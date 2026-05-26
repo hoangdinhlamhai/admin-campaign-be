@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "admin-campaign-be",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "admin-campaign-db",
+      "database_id": "d39b539b-fdbe-4153-818e-c80d17a30016",
+      "migrations_dir": "drizzle/migrations"
+    }
+  ],
+  "vars": {
+    "JWT_SECRET": "dev-secret-change-in-production"
+  }
+}

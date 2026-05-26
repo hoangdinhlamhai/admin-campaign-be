@@ -1,0 +1,25 @@
+{
+  "name": "admin-campaign-be",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --minify",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply admin-campaign-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply admin-campaign-db --remote",
+    "db:studio": "drizzle-kit studio",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.23"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260526.1",
+    "@types/bcryptjs": "^3.0.0",
+    "better-sqlite3": "^12.10.0",
+    "drizzle-kit": "^0.31.10",
+    "wrangler": "^4.4.0"
+  }
+}
