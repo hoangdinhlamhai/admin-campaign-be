@@ -20,6 +20,7 @@
     "@types/bcryptjs": "^3.0.0",
     "better-sqlite3": "^12.10.0",
     "drizzle-kit": "^0.31.10",
+    "typescript": "^6.0.3",
     "wrangler": "^4.4.0"
   }
 }

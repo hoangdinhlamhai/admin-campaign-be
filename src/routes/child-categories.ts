@@ -58,6 +58,8 @@ childCategoryRoutes.post('/', requirePermission('categories.create'), async (c) 
   const parent = await db.select().from(parentCategories).where(eq(parentCategories.id, body.parentId)).get()
   if (!parent) return c.json({ error: 'Parent category not found' }, 400)
 
+  const userId = c.get('userId')
+
   await db.insert(childCategories).values({
     id,
     parentId: body.parentId,
@@ -68,7 +70,7 @@ childCategoryRoutes.post('/', requirePermission('categories.create'), async (c) 
     description: body.description,
     dailyUserTarget: body.dailyUserTarget ?? 0,
     status: body.status ?? 'active',
-    createdBy: c.get('userId'),
+    createdBy: userId === 'dev-admin' ? null : userId,
   })
 
   return c.json({ id }, 201)

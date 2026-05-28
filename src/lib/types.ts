@@ -1,6 +1,8 @@
 export type AppBindings = {
   DB: D1Database
+  MEDIA: R2Bucket
   JWT_SECRET: string
+  RATE_LIMITER?: { limit: (opts: { key: string }) => Promise<{ success: boolean }> }
 }
 
 export type AppVariables = {

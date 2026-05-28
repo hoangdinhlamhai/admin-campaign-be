@@ -66,7 +66,7 @@ userRoutes.post('/', requirePermission('users.manage'), async (c) => {
     passwordHash: '$placeholder', // TODO: hash password
     role: body.role ?? 'employee',
     status: body.status ?? 'active',
-    createdBy: c.get('userId'),
+    createdBy: c.get('userId') === 'dev-admin' ? null : c.get('userId'),
   })
 
   // Set permissions for employee

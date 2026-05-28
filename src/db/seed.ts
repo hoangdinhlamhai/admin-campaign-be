@@ -1,4 +1,4 @@
-import { users, userPermissions, parentCategories, childCategories } from './schema'
+import { users, userPermissions, parentCategories, childCategories, alertsMeta } from './schema'
 import type { Database } from './client'
 import { hashSync } from 'bcryptjs'
 
@@ -56,6 +56,9 @@ export async function seed(db: Database) {
     { id: crypto.randomUUID(), parentId: pCara, name: 'Nhẫn bạc nữ', website: 'caraluna.com/nhan-bac', initials: 'NB', slug: 'nhan-bac-nu', dailyUserTarget: 8, status: 'active', createdBy: adminId },
     { id: crypto.randomUUID(), parentId: pLuna, name: 'Lắc tay bạc', website: 'lunasilver.com/lac-tay', initials: 'LT', slug: 'lac-tay-bac', dailyUserTarget: 12, status: 'active', createdBy: adminId },
   ])
+
+  // ─── 5. Alerts meta singleton ───
+  await db.insert(alertsMeta).values({ id: 1, version: 0 })
 
   return { adminId, empId, parentIds: { caraluna: pCara, lunaSilver: pLuna, lunaFashion: pFash } }
 }

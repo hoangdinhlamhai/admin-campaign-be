@@ -12,7 +12,16 @@
       "migrations_dir": "drizzle/migrations"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "admin-campaign-media"
+    }
+  ],
   "vars": {
     "JWT_SECRET": "dev-secret-change-in-production"
+  },
+  "triggers": {
+    "crons": ["55 16 * * *"]
   }
 }

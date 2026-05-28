@@ -262,7 +262,18 @@ export const alerts = sqliteTable('alerts', {
 }, (table) => [
   index('idx_alerts_status').on(table.status, table.severity),
   index('idx_alerts_campaign').on(table.campaignId),
+  index('idx_alerts_dedup').on(table.campaignId, table.type, table.status, table.triggeredAt),
 ])
+
+// ═══════════════════════════════════════════════════════════
+// Alerts Meta (single-row counter for FE polling)
+// ═══════════════════════════════════════════════════════════
+
+export const alertsMeta = sqliteTable('alerts_meta', {
+  id: integer('id').primaryKey().default(1),
+  version: integer('version').notNull().default(0),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+})
 
 // ═══════════════════════════════════════════════════════════
 // Audit Logs

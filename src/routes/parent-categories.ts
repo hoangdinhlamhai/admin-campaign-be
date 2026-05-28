@@ -41,7 +41,7 @@ parentCategoryRoutes.post('/', requirePermission('categories.create'), async (c)
     description: body.description,
     dailyUserTarget: body.dailyUserTarget ?? 0,
     status: body.status ?? 'active',
-    createdBy: c.get('userId'),
+    createdBy: c.get('userId') === 'dev-admin' ? null : c.get('userId'),
   })
 
   return c.json({ id }, 201)
