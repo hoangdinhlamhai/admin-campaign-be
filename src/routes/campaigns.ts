@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { createDb } from '../db/client'
-import { campaigns, campaignInstructions, campaignSettings, campaignDailyStats, parentCategories, childCategories, users, auditLogs } from '../db/schema'
+import { campaigns, campaignInstructions, campaignSettings, campaignDailyStats, campaignAttempts, campaignAdDailyStats, alerts, parentCategories, childCategories, users, auditLogs } from '../db/schema'
 import { eq, sql, and } from 'drizzle-orm'
 import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
@@ -436,6 +436,15 @@ campaignRoutes.patch('/:id/assignee', requirePermission('campaigns.edit'), async
 campaignRoutes.delete('/:id', requirePermission('campaigns.delete'), requireCampaignOwnerOrAdmin(), async (c) => {
   const db = createDb(c.env.DB)
   const id = c.req.param('id')
+
+  // Manually clean up rows in tables whose FK to campaigns has no ON DELETE CASCADE
+  // (campaign_attempts, campaign_daily_stats, campaign_ad_daily_stats, alerts).
+  // Cascading tables (instructions, instruction_versions, settings) handle themselves.
+  await db.delete(campaignAttempts).where(eq(campaignAttempts.campaignId, id))
+  await db.delete(campaignDailyStats).where(eq(campaignDailyStats.campaignId, id))
+  await db.delete(campaignAdDailyStats).where(eq(campaignAdDailyStats.campaignId, id))
+  await db.delete(alerts).where(eq(alerts.campaignId, id))
+
   await db.delete(campaigns).where(eq(campaigns.id, id))
   return c.json({ ok: true })
 })
