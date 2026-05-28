@@ -19,7 +19,9 @@
     }
   ],
   "vars": {
-    "JWT_SECRET": "dev-secret-change-in-production"
+    "JWT_SECRET": "dev-secret-change-in-production",
+    "FE_URL": "http://localhost:5173",
+    "RESEND_FROM": "onboarding@resend.dev"
   },
   "triggers": {
     "crons": ["55 16 * * *"]

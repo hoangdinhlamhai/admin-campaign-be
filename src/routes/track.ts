@@ -4,6 +4,7 @@ import { createDb } from '../db/client'
 import { campaigns, campaignAttempts, campaignDailyStats } from '../db/schema'
 import { evaluateWrongPass } from '../lib/alerts/evaluators/wrong-pass'
 import { evaluateNoValidEntry } from '../lib/alerts/evaluators/no-valid-entry'
+import { evaluateTargetReached } from '../lib/alerts/evaluators/target-reached'
 import type { AppEnv } from '../lib/types'
 import type { Database } from '../db/client'
 
@@ -58,6 +59,7 @@ trackRoutes.post('/attempt', async (c) => {
   await Promise.all([
     evaluateWrongPass(db, camp.id, today),
     evaluateNoValidEntry(db, camp.id, today),
+    evaluateTargetReached(db, c.env, c.executionCtx, camp.id, today),
   ])
 
   return c.json({ ok: true })
