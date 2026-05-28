@@ -89,12 +89,15 @@ export const campaigns = sqliteTable('campaigns', {
   endsAt: text('ends_at'),
   createdBy: text('created_by').references(() => users.id),
   updatedBy: text('updated_by').references(() => users.id),
+  assignedTo: text('assigned_to')
+    .references(() => users.id, { onDelete: 'set null' }),
   createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
   publishedAt: text('published_at'),
 }, (table) => [
   index('idx_camp_parent_status').on(table.parentCategoryId, table.status),
   index('idx_camp_priority').on(table.priority),
+  index('idx_camp_assignee').on(table.assignedTo),
 ])
 
 // ═══════════════════════════════════════════════════════════

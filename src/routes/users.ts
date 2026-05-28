@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { createDb } from '../db/client'
-import { users, userPermissions } from '../db/schema'
+import { users, userPermissions, campaigns } from '../db/schema'
 import { eq, sql } from 'drizzle-orm'
 import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
@@ -117,6 +117,28 @@ userRoutes.delete('/:id', requirePermission('users.manage'), async (c) => {
     return c.json({ error: 'Cannot delete yourself' }, 400)
   }
 
+  // Nullify assignedTo on campaigns owned by this user (SQLite ALTER TABLE didn't enforce FK SET NULL)
+  await db.update(campaigns)
+    .set({ assignedTo: null })
+    .where(eq(campaigns.assignedTo, id))
+
   await db.delete(users).where(eq(users.id, id))
   return c.json({ ok: true })
+})
+
+// GET /api/users/:id/campaigns — list campaigns this user is assigned to
+userRoutes.get('/:id/campaigns', requirePermission('users.view'), async (c) => {
+  const db = createDb(c.env.DB)
+  const id = c.req.param('id')
+  const result = await db.select({
+    id: campaigns.id,
+    code: campaigns.code,
+    name: campaigns.name,
+    status: campaigns.status,
+    priority: campaigns.priority,
+    createdAt: campaigns.createdAt,
+  }).from(campaigns)
+    .where(eq(campaigns.assignedTo, id))
+    .orderBy(campaigns.createdAt)
+  return c.json(result)
 })
