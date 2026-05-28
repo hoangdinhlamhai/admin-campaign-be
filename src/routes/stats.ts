@@ -6,6 +6,7 @@ import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
 import { parseDateRange, rangeDays } from '../lib/stats/range-helpers'
 import { aggregateStats } from '../lib/stats/aggregate-stats'
+import { getCampaignSummary } from '../lib/stats/campaign-summary'
 import { loadCategoryStats, type CategoryScope } from '../lib/stats/category-stats'
 import type { AppEnv } from '../lib/types'
 
@@ -60,6 +61,16 @@ statsRoutes.get('/dashboard', requirePermission('campaigns.view'), async (c) => 
     totalPausedCampaigns,
     ...(categoryStats ? { categoryStats } : {}),
   })
+})
+
+// GET /api/stats/campaigns-summary?from=YYYY-MM-DD&to=YYYY-MM-DD
+statsRoutes.get('/campaigns-summary', requirePermission('campaigns.view'), async (c) => {
+  const db = createDb(c.env.DB)
+  const range = parseDateRange(c.req.query('from'), c.req.query('to'))
+
+  const summary = await getCampaignSummary(db, range)
+
+  return c.json(summary)
 })
 
 // GET /api/stats/overview-table?from=YYYY-MM-DD&to=YYYY-MM-DD&q=&parentId=&childId=
