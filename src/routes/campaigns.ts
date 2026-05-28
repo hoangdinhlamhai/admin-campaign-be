@@ -262,7 +262,27 @@ campaignRoutes.get('/:id/full', requirePermission('campaigns.view'), async (c) =
   if (!campaign) return c.json({ error: 'Not found' }, 404)
 
   const instructions = await db.select().from(campaignInstructions).where(eq(campaignInstructions.campaignId, id)).get()
-  const settings = await db.select().from(campaignSettings).where(eq(campaignSettings.campaignId, id)).get()
+  let settings = await db.select().from(campaignSettings).where(eq(campaignSettings.campaignId, id)).get()
+
+  // Backfill default settings row for legacy campaigns created before
+  // campaign_settings was wired (or via POST /api/campaigns without /full).
+  // Defaults intentionally enable notifications + safety rules so the
+  // detail page reflects what users see in the create wizard.
+  if (!settings) {
+    await db.insert(campaignSettings).values({
+      campaignId: id,
+      notifyLowUsers: true,
+      lowUsersThreshold: 5,
+      notifyCampaignPaused: true,
+      autoReactivateNextDay: true,
+      limitWrongPass: true,
+      maxWrongPassAttempts: 3,
+      pauseOnNoValidEntry: true,
+      noValidEntryDisplays: 5,
+      updatedBy: null,
+    }).onConflictDoNothing()
+    settings = await db.select().from(campaignSettings).where(eq(campaignSettings.campaignId, id)).get()
+  }
 
   let assignedToName: string | null = null
   if (campaign.assignedTo) {
@@ -324,6 +344,21 @@ campaignRoutes.post('/', requirePermission('campaigns.create'), async (c) => {
     createdBy: userId === 'dev-admin' ? null : userId,
     updatedBy: userId === 'dev-admin' ? null : userId,
   })
+
+  // Default safety settings — keeps the detail page in sync with what
+  // users see toggled-on by default in the create wizard.
+  await db.insert(campaignSettings).values({
+    campaignId: id,
+    notifyLowUsers: true,
+    lowUsersThreshold: 5,
+    notifyCampaignPaused: true,
+    autoReactivateNextDay: true,
+    limitWrongPass: true,
+    maxWrongPassAttempts: body.maxWrongAttempts ?? 3,
+    pauseOnNoValidEntry: true,
+    noValidEntryDisplays: 5,
+    updatedBy: userId === 'dev-admin' ? null : userId,
+  }).onConflictDoNothing()
 
   return c.json({ id, code }, 201)
 })
