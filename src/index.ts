@@ -61,7 +61,7 @@ app.post('/api/dev/reset', async (c) => {
       'category_daily_stats', 'campaign_daily_stats', 'campaign_attempts',
       'campaign_settings', 'campaign_instruction_versions', 'campaign_instructions',
       'media_assets', 'campaigns', 'child_categories', 'parent_categories',
-      'user_permissions', 'users',
+      'user_permissions', 'global_settings', 'users',
     ]
     for (const table of tables) {
       await c.env.DB.prepare(`DELETE FROM ${table}`).run()
