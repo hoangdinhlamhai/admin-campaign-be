@@ -15,6 +15,7 @@ import { createDb } from './db/client'
 import { seed } from './db/seed'
 import { runDailyEvaluator } from './lib/alerts/evaluators/low-users'
 import { runAutoReactivate } from './lib/alerts/evaluators/auto-reactivate'
+import { evaluateTargetReached } from './lib/alerts/evaluators/target-reached'
 import type { AppEnv, AppBindings } from './lib/types'
 
 const app = new Hono<AppEnv>()
@@ -97,6 +98,20 @@ app.post('/api/dev/run-auto-reactivate', async (c) => {
   const db = createDb(c.env.DB)
   try {
     const result = await runAutoReactivate(db)
+    return c.json({ ok: true, ...result })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+// Dev-only: manually trigger target-reached evaluator for a specific campaign.
+// Used for QA/E2E testing without depending on real tracker traffic.
+app.post('/api/dev/run-target-reached/:campaignId', async (c) => {
+  const db = createDb(c.env.DB)
+  const campaignId = c.req.param('campaignId')
+  const today = new Date().toISOString().slice(0, 10)
+  try {
+    const result = await evaluateTargetReached(db, c.env, c.executionCtx, campaignId, today)
     return c.json({ ok: true, ...result })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)

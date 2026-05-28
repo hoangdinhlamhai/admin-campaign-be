@@ -1,0 +1,8 @@
+# Local dev secrets for Cloudflare Worker (gitignored).
+# Production: set via `wrangler secret put RESEND_API_KEY` etc.
+
+# Resend API key — get one free at https://resend.com (dev sandbox: re_test_...)
+RESEND_API_KEY=
+
+# Default sender. For dev use Resend default; for prod use verified domain.
+# RESEND_FROM=no-reply@admin.senlyzer.io

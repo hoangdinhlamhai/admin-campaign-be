@@ -1,4 +1,4 @@
-export type AlertType = 'low_users' | 'no_valid_entry' | 'wrong_pass_exceeded' | 'campaign_paused'
+export type AlertType = 'low_users' | 'no_valid_entry' | 'wrong_pass_exceeded' | 'campaign_paused' | 'target_reached'
 export type AlertSeverity = 'info' | 'warning' | 'danger'
 
 export type EmitAlertParams = {

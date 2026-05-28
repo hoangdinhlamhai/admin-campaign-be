@@ -3,6 +3,9 @@ export type AppBindings = {
   MEDIA: R2Bucket
   JWT_SECRET: string
   RATE_LIMITER?: { limit: (opts: { key: string }) => Promise<{ success: boolean }> }
+  RESEND_API_KEY?: string
+  RESEND_FROM?: string
+  FE_URL?: string
 }
 
 export type AppVariables = {
