@@ -1,10 +1,10 @@
 import { Hono } from 'hono'
 import { createDb } from '../db/client'
-import { campaignDailyStats, campaigns, parentCategories, childCategories } from '../db/schema'
+import { campaignDailyStats, campaignAdDailyStats, campaigns, parentCategories, childCategories } from '../db/schema'
 import { and, eq, gte, lte, like, or, sql } from 'drizzle-orm'
 import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
-import { parseRange, rangeWindow, previousWindow, rangeDays } from '../lib/stats/range-helpers'
+import { parseDateRange, rangeDays } from '../lib/stats/range-helpers'
 import { aggregateStats } from '../lib/stats/aggregate-stats'
 import { loadCategoryStats, type CategoryScope } from '../lib/stats/category-stats'
 import type { AppEnv } from '../lib/types'
@@ -13,17 +13,12 @@ export const statsRoutes = new Hono<AppEnv>()
 
 statsRoutes.use('*', authMiddleware)
 
-// GET /api/stats/dashboard?range=today|7d|30d — overview stats with previous period
+// GET /api/stats/dashboard?from=YYYY-MM-DD&to=YYYY-MM-DD
 statsRoutes.get('/dashboard', requirePermission('campaigns.view'), async (c) => {
   const db = createDb(c.env.DB)
-  const rangeKey = parseRange(c.req.query('range'))
-  const curr = rangeWindow(rangeKey)
-  const prev = previousWindow(curr)
+  const range = parseDateRange(c.req.query('from'), c.req.query('to'))
 
-  const [stats, prevStats] = await Promise.all([
-    aggregateStats(db, curr),
-    aggregateStats(db, prev),
-  ])
+  const stats = await aggregateStats(db, range)
 
   // Campaign counts by status
   const statusCounts = await db
@@ -41,7 +36,7 @@ statsRoutes.get('/dashboard', requirePermission('campaigns.view'), async (c) => 
     .where(eq(parentCategories.status, 'active'))
     .get()
 
-  // Total paused campaigns (always included)
+  // Total paused campaigns
   const pausedCampaignsRow = await db
     .select({ count: sql<number>`count(*)` })
     .from(campaigns)
@@ -53,20 +48,13 @@ statsRoutes.get('/dashboard', requirePermission('campaigns.view'), async (c) => 
   const categoryScopeParam = c.req.query('categoryScope')
   let categoryStats: import('../lib/stats/category-stats').CategoryStats | undefined
   if (categoryScopeParam === 'parent' || categoryScopeParam === 'child') {
-    const today = curr.to
-    categoryStats = await loadCategoryStats(db, categoryScopeParam as CategoryScope, today)
+    categoryStats = await loadCategoryStats(db, categoryScopeParam as CategoryScope, range)
   }
 
   return c.json({
-    range: rangeKey,
-    from: curr.from,
-    to: curr.to,
+    from: range.from,
+    to: range.to,
     stats,
-    previous: {
-      from: prev.from,
-      to: prev.to,
-      stats: prevStats,
-    },
     campaignsByStatus: statusCounts,
     activeCategoryCount: catCount?.count ?? 0,
     totalPausedCampaigns,
@@ -74,22 +62,18 @@ statsRoutes.get('/dashboard', requirePermission('campaigns.view'), async (c) => 
   })
 })
 
-// GET /api/stats/overview-table?range=7d&q=&parentId=&childId=
+// GET /api/stats/overview-table?from=YYYY-MM-DD&to=YYYY-MM-DD&q=&parentId=&childId=
 statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c) => {
   const db = createDb(c.env.DB)
-  const rangeKey = parseRange(c.req.query('range'))
-  const curr = rangeWindow(rangeKey)
-  const days = rangeDays(curr)
+  const range = parseDateRange(c.req.query('from'), c.req.query('to'))
+  const days = rangeDays(range)
 
   const q = c.req.query('q')?.trim()
   const parentId = c.req.query('parentId')
   const childId = c.req.query('childId')
 
-  // Build WHERE conditions
-  const conditions = [
-    gte(campaignDailyStats.statDate, curr.from),
-    lte(campaignDailyStats.statDate, curr.to),
-  ]
+  // Build WHERE conditions for campaigns
+  const conditions: ReturnType<typeof eq>[] = []
 
   if (parentId) {
     conditions.push(eq(campaigns.parentCategoryId, parentId))
@@ -103,6 +87,21 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
       like(campaigns.code, `%${q}%`),
     )!)
   }
+
+  // Subquery: aggregate ad stats per campaign within date range
+  const adAgg = db
+    .select({
+      campaignId: campaignAdDailyStats.campaignId,
+      adCost: sql<number>`coalesce(sum(${campaignAdDailyStats.cost}), 0)`.as('ad_cost'),
+      adClicks: sql<number>`coalesce(sum(${campaignAdDailyStats.clicks}), 0)`.as('ad_clicks'),
+    })
+    .from(campaignAdDailyStats)
+    .where(and(
+      gte(campaignAdDailyStats.statDate, range.from),
+      lte(campaignAdDailyStats.statDate, range.to),
+    ))
+    .groupBy(campaignAdDailyStats.campaignId)
+    .as('ad_agg')
 
   const rows = await db
     .select({
@@ -120,25 +119,35 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
       wrong: sql<number>`coalesce(sum(${campaignDailyStats.wrongEntryCount}), 0)`,
       completed: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`,
       missing: sql<number>`coalesce(sum(${campaignDailyStats.missingCount}), 0)`,
+      cost: adAgg.adCost,
+      clicks: adAgg.adClicks,
     })
     .from(campaigns)
     .leftJoin(campaignDailyStats, and(
       eq(campaignDailyStats.campaignId, campaigns.id),
-      gte(campaignDailyStats.statDate, curr.from),
-      lte(campaignDailyStats.statDate, curr.to),
+      gte(campaignDailyStats.statDate, range.from),
+      lte(campaignDailyStats.statDate, range.to),
     ))
     .leftJoin(parentCategories, eq(parentCategories.id, campaigns.parentCategoryId))
     .leftJoin(childCategories, eq(childCategories.id, campaigns.childCategoryId))
-    .where(and(...conditions))
+    .leftJoin(adAgg, eq(adAgg.campaignId, campaigns.id))
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
     .groupBy(campaigns.id)
 
   const items = rows.map((r) => {
     const target = (r.dailyUserTarget ?? 0) * days
     const displays = r.displays ?? 0
     const completed = r.completed ?? 0
-    const conversionRate = displays > 0
-      ? Math.round((completed / displays) * 10000) / 100
-      : 0
+    const cost = r.cost ?? 0
+    const clicks = r.clicks ?? 0
+
+    const conversionRate = clicks > 0
+      ? Math.round((completed / clicks) * 10000) / 100
+      : displays > 0
+        ? Math.round((completed / displays) * 10000) / 100
+        : 0
+
+    const cpa = completed > 0 && cost > 0 ? Math.round(cost / completed) : null
 
     return {
       id: r.id,
@@ -156,18 +165,16 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
       completed,
       missing: r.missing ?? 0,
       conversionRate,
-      // Ad columns reserved for future Google Ads integration
-      cost: null,
-      clicks: null,
-      cpa: null,
+      cost: cost > 0 ? cost : null,
+      clicks: clicks > 0 ? clicks : null,
+      cpa,
       source: null,
     }
   })
 
   return c.json({
-    range: rangeKey,
-    from: curr.from,
-    to: curr.to,
+    from: range.from,
+    to: range.to,
     items,
     total: items.length,
   })
