@@ -1,5 +1,5 @@
 import { and, gte, lte, sql } from 'drizzle-orm'
-import { campaignDailyStats } from '../../db/schema'
+import { campaignDailyStats, campaignAdDailyStats } from '../../db/schema'
 import type { Database } from '../../db/client'
 import type { DateRange } from './range-helpers'
 
@@ -10,11 +10,14 @@ export type AggregatedStats = {
   totalDisplays: number
   totalWrong: number
   totalValid: number
+  totalCost: number
+  totalClicks: number
+  cpa: number
   conversionRate: number
 }
 
 export async function aggregateStats(db: Database, range: DateRange): Promise<AggregatedStats> {
-  const row = await db
+  const dailyRow = await db
     .select({
       totalTarget: sql<number>`coalesce(sum(${campaignDailyStats.dailyUserTarget}), 0)`,
       totalCompleted: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`,
@@ -30,19 +33,40 @@ export async function aggregateStats(db: Database, range: DateRange): Promise<Ag
     ))
     .get()
 
-  const totalDisplays = row?.totalDisplays ?? 0
-  const totalCompleted = row?.totalCompleted ?? 0
-  const conversionRate = totalDisplays > 0
-    ? Math.round((totalCompleted / totalDisplays) * 10000) / 100
-    : 0
+  const adRow = await db
+    .select({
+      totalCost: sql<number>`coalesce(sum(${campaignAdDailyStats.cost}), 0)`,
+      totalClicks: sql<number>`coalesce(sum(${campaignAdDailyStats.clicks}), 0)`,
+    })
+    .from(campaignAdDailyStats)
+    .where(and(
+      gte(campaignAdDailyStats.statDate, range.from),
+      lte(campaignAdDailyStats.statDate, range.to),
+    ))
+    .get()
+
+  const totalCompleted = dailyRow?.totalCompleted ?? 0
+  const totalDisplays = dailyRow?.totalDisplays ?? 0
+  const totalCost = adRow?.totalCost ?? 0
+  const totalClicks = adRow?.totalClicks ?? 0
+
+  const cpa = totalCompleted > 0 ? Math.round(totalCost / totalCompleted) : 0
+  const conversionRate = totalClicks > 0
+    ? Math.round((totalCompleted / totalClicks) * 10000) / 100
+    : totalDisplays > 0
+      ? Math.round((totalCompleted / totalDisplays) * 10000) / 100
+      : 0
 
   return {
-    totalTarget: row?.totalTarget ?? 0,
+    totalTarget: dailyRow?.totalTarget ?? 0,
     totalCompleted,
-    totalMissing: row?.totalMissing ?? 0,
+    totalMissing: dailyRow?.totalMissing ?? 0,
     totalDisplays,
-    totalWrong: row?.totalWrong ?? 0,
-    totalValid: row?.totalValid ?? 0,
+    totalWrong: dailyRow?.totalWrong ?? 0,
+    totalValid: dailyRow?.totalValid ?? 0,
+    totalCost,
+    totalClicks,
+    cpa,
     conversionRate,
   }
 }
