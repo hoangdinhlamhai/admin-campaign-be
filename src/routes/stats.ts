@@ -6,6 +6,7 @@ import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
 import { parseRange, rangeWindow, previousWindow, rangeDays } from '../lib/stats/range-helpers'
 import { aggregateStats } from '../lib/stats/aggregate-stats'
+import { loadCategoryStats, type CategoryScope } from '../lib/stats/category-stats'
 import type { AppEnv } from '../lib/types'
 
 export const statsRoutes = new Hono<AppEnv>()
@@ -40,6 +41,22 @@ statsRoutes.get('/dashboard', requirePermission('campaigns.view'), async (c) => 
     .where(eq(parentCategories.status, 'active'))
     .get()
 
+  // Total paused campaigns (always included)
+  const pausedCampaignsRow = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(campaigns)
+    .where(eq(campaigns.status, 'paused'))
+    .get()
+  const totalPausedCampaigns = pausedCampaignsRow?.count ?? 0
+
+  // Category-scoped stats (only when categoryScope query param is set)
+  const categoryScopeParam = c.req.query('categoryScope')
+  let categoryStats: import('../lib/stats/category-stats').CategoryStats | undefined
+  if (categoryScopeParam === 'parent' || categoryScopeParam === 'child') {
+    const today = curr.to
+    categoryStats = await loadCategoryStats(db, categoryScopeParam as CategoryScope, today)
+  }
+
   return c.json({
     range: rangeKey,
     from: curr.from,
@@ -52,6 +69,8 @@ statsRoutes.get('/dashboard', requirePermission('campaigns.view'), async (c) => 
     },
     campaignsByStatus: statusCounts,
     activeCategoryCount: catCount?.count ?? 0,
+    totalPausedCampaigns,
+    ...(categoryStats ? { categoryStats } : {}),
   })
 })
 
