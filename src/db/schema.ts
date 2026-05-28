@@ -276,6 +276,17 @@ export const alertsMeta = sqliteTable('alerts_meta', {
 })
 
 // ═══════════════════════════════════════════════════════════
+// Global Settings (key-value store for system defaults)
+// ═══════════════════════════════════════════════════════════
+
+export const globalSettings = sqliteTable('global_settings', {
+  key: text('key').primaryKey(),
+  value: text('value'),
+  updatedBy: text('updated_by').references(() => users.id),
+  updatedAt: text('updated_at').notNull().default(sql`(datetime('now'))`),
+})
+
+// ═══════════════════════════════════════════════════════════
 // Audit Logs
 // ═══════════════════════════════════════════════════════════
 

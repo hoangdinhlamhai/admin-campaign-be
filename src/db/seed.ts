@@ -1,6 +1,7 @@
-import { users, userPermissions, parentCategories, childCategories, alertsMeta } from './schema'
+import { users, userPermissions, parentCategories, childCategories, alertsMeta, globalSettings } from './schema'
 import type { Database } from './client'
 import { hashSync } from 'bcryptjs'
+import { GLOBAL_SETTING_KEYS, GLOBAL_SETTING_DEFAULTS } from '../lib/settings/default-values'
 
 export async function seed(db: Database) {
   const adminId = crypto.randomUUID()
@@ -59,6 +60,22 @@ export async function seed(db: Database) {
 
   // ─── 5. Alerts meta singleton ───
   await db.insert(alertsMeta).values({ id: 1, version: 0 })
+
+  // ─── 6. Global settings defaults ───
+  await db.insert(globalSettings).values(
+    GLOBAL_SETTING_KEYS.map((key) => ({
+      key,
+      value: JSON.stringify(GLOBAL_SETTING_DEFAULTS[key]),
+      updatedBy: adminId,
+    })),
+  )
+
+  // ─── 7. Settings permissions ───
+  await db.insert(userPermissions).values([
+    { userId: adminId, permission: 'settings.manage' },
+    { userId: adminId, permission: 'settings.view' },
+    { userId: empId, permission: 'settings.view' },
+  ])
 
   return { adminId, empId, parentIds: { caraluna: pCara, lunaSilver: pLuna, lunaFashion: pFash } }
 }

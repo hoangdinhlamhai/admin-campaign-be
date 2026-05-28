@@ -29,3 +29,5 @@ export type Permission =
   | 'alerts.view'
   | 'alerts.manage'
   | 'reports.view'
+  | 'settings.view'
+  | 'settings.manage'

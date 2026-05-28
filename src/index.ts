@@ -8,6 +8,7 @@ import { childCategoryRoutes } from './routes/child-categories'
 import { campaignRoutes } from './routes/campaigns'
 import { alertRoutes } from './routes/alerts'
 import { statsRoutes } from './routes/stats'
+import { settingsRoutes } from './routes/settings'
 import { mediaRoutes } from './routes/media'
 import { trackRoutes } from './routes/track'
 import { authMiddleware } from './middleware/auth'
@@ -47,6 +48,7 @@ app.route('/api/child-categories', childCategoryRoutes)
 app.route('/api/campaigns', campaignRoutes)
 app.route('/api/alerts', alertRoutes)
 app.route('/api/stats', statsRoutes)
+app.route('/api/settings', settingsRoutes)
 app.route('/api/media', mediaRoutes)
 app.route('/api/track', trackRoutes)
 
@@ -61,7 +63,7 @@ app.post('/api/dev/reset', async (c) => {
       'category_daily_stats', 'campaign_daily_stats', 'campaign_attempts',
       'campaign_settings', 'campaign_instruction_versions', 'campaign_instructions',
       'media_assets', 'campaigns', 'child_categories', 'parent_categories',
-      'user_permissions', 'users',
+      'user_permissions', 'global_settings', 'users',
     ]
     for (const table of tables) {
       await c.env.DB.prepare(`DELETE FROM ${table}`).run()
