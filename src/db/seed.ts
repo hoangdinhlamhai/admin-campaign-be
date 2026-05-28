@@ -1,5 +1,6 @@
-import { users, userPermissions, parentCategories, childCategories, alertsMeta, globalSettings } from './schema'
+import { users, userPermissions, parentCategories, childCategories, alertsMeta, globalSettings, campaigns } from './schema'
 import type { Database } from './client'
+import { eq, inArray } from 'drizzle-orm'
 import { hashSync } from 'bcryptjs'
 import { GLOBAL_SETTING_KEYS, GLOBAL_SETTING_DEFAULTS } from '../lib/settings/default-values'
 
@@ -76,6 +77,22 @@ export async function seed(db: Database) {
     { userId: adminId, permission: 'settings.view' },
     { userId: empId, permission: 'settings.view' },
   ])
+
+  // ─── 8. Sample campaigns ───
+  const campIds = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]
+  await db.insert(campaigns).values([
+    { id: campIds[0], code: 'CMP-001', parentCategoryId: pCara, name: 'Dây chuyền bạc nữ - Tháng 5', keyword: 'day-chuyen-bac', dailyUserTarget: 10, priority: 'high', status: 'active', createdBy: adminId },
+    { id: campIds[1], code: 'CMP-002', parentCategoryId: pCara, name: 'Nhẫn bạc nữ - Quà tặng', keyword: 'nhan-bac-nu', dailyUserTarget: 8, priority: 'medium', status: 'active', createdBy: adminId },
+    { id: campIds[2], code: 'CMP-003', parentCategoryId: pLuna, name: 'Caraluna - Tổng hợp', keyword: 'caraluna-tong-hop', dailyUserTarget: 15, priority: 'medium', status: 'active', createdBy: adminId },
+    { id: campIds[3], code: 'CMP-004', parentCategoryId: pFash, name: 'Luna Fashion - Bông tai', keyword: 'bong-tai', dailyUserTarget: 5, priority: 'low', status: 'draft', createdBy: adminId },
+  ])
+
+  // ─── 9. Assign campaigns to users ───
+  // CMP-001, CMP-002 → employee (Mai), CMP-003 → admin, CMP-004 → NULL (default)
+  await db.update(campaigns).set({ assignedTo: empId })
+    .where(inArray(campaigns.code, ['CMP-001', 'CMP-002']))
+  await db.update(campaigns).set({ assignedTo: adminId })
+    .where(eq(campaigns.code, 'CMP-003'))
 
   return { adminId, empId, parentIds: { caraluna: pCara, lunaSilver: pLuna, lunaFashion: pFash } }
 }

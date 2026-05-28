@@ -1,9 +1,10 @@
 import { Hono } from 'hono'
 import { createDb } from '../db/client'
-import { campaigns, campaignInstructions, campaignSettings, campaignDailyStats, parentCategories, childCategories } from '../db/schema'
+import { campaigns, campaignInstructions, campaignSettings, campaignDailyStats, parentCategories, childCategories, users, auditLogs } from '../db/schema'
 import { eq, sql, and } from 'drizzle-orm'
 import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
+import { requireCampaignOwnerOrAdmin } from '../middleware/ownership'
 import { emitCampaignPausedAlert } from '../lib/alerts/evaluators/campaign-paused'
 import type { AppEnv } from '../lib/types'
 
@@ -70,6 +71,8 @@ campaignRoutes.get('/', requirePermission('campaigns.view'), async (c) => {
       status: campaigns.status,
       createdAt: campaigns.createdAt,
       publishedAt: campaigns.publishedAt,
+      assignedTo: campaigns.assignedTo,
+      assignedToName: users.name,
       completedCount: sql<number>`COALESCE(${statsAgg.completedCount}, 0)`,
       missingCount: sql<number>`COALESCE(${statsAgg.missingCount}, 0)`,
       displayCount: sql<number>`COALESCE(${statsAgg.displayCount}, 0)`,
@@ -79,11 +82,19 @@ campaignRoutes.get('/', requirePermission('campaigns.view'), async (c) => {
     .from(campaigns)
     .leftJoin(parentCategories, eq(campaigns.parentCategoryId, parentCategories.id))
     .leftJoin(childCategories, eq(campaigns.childCategoryId, childCategories.id))
+    .leftJoin(users, eq(campaigns.assignedTo, users.id))
     .leftJoin(statsAgg, eq(statsAgg.campaignId, campaigns.id))
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(campaigns.createdAt)
 
-  return c.json(result)
+  const role = c.get('userRole')
+  const userId = c.get('userId')
+  const enriched = result.map(r => ({
+    ...r,
+    isOwner: role === 'admin' || r.assignedTo === userId,
+  }))
+
+  return c.json(enriched)
 })
 
 // GET /api/campaigns/:id
@@ -92,7 +103,21 @@ campaignRoutes.get('/:id', requirePermission('campaigns.view'), async (c) => {
   const id = c.req.param('id')
   const item = await db.select().from(campaigns).where(eq(campaigns.id, id)).get()
   if (!item) return c.json({ error: 'Not found' }, 404)
-  return c.json(item)
+
+  let assignedToName: string | null = null
+  if (item.assignedTo) {
+    const u = await db.select({ name: users.name })
+      .from(users)
+      .where(eq(users.id, item.assignedTo))
+      .get()
+    assignedToName = u?.name ?? null
+  }
+
+  const role = c.get('userRole')
+  const userId = c.get('userId')
+  const isOwner = role === 'admin' || item.assignedTo === userId
+
+  return c.json({ ...item, assignedToName, isOwner })
 })
 
 // POST /api/campaigns/full — atomic create campaign + instructions + settings
@@ -101,10 +126,16 @@ campaignRoutes.post('/full', requirePermission('campaigns.create'), async (c) =>
   const body = await c.req.json()
   const userId = c.get('userId')
   const createdBy = userId === 'dev-admin' ? null : userId
+  const role = c.get('userRole')
 
   if (!body.parentCategoryId || !body.name || !body.instructions?.contentHtml) {
     return c.json({ error: 'Missing required fields: parentCategoryId, name, instructions.contentHtml' }, 400)
   }
+
+  // Admin can assign to anyone (or NULL); employee force = self
+  const assignedTo = role === 'admin'
+    ? (body.assignedTo ?? null)
+    : (userId === 'dev-admin' ? null : userId)
 
   const id = crypto.randomUUID()
   const count = await db.select({ count: sql<number>`count(*)` }).from(campaigns).get()
@@ -129,6 +160,7 @@ campaignRoutes.post('/full', requirePermission('campaigns.create'), async (c) =>
       startsAt: body.startsAt ?? null,
       endsAt: body.endsAt ?? null,
       publishedAt: status === 'active' ? now : null,
+      assignedTo,
       createdBy,
       updatedBy: createdBy,
     })
@@ -166,7 +198,7 @@ campaignRoutes.post('/full', requirePermission('campaigns.create'), async (c) =>
 })
 
 // PUT /api/campaigns/:id/full — atomic overwrite (no version history)
-campaignRoutes.put('/:id/full', requirePermission('campaigns.edit'), async (c) => {
+campaignRoutes.put('/:id/full', requirePermission('campaigns.edit'), requireCampaignOwnerOrAdmin(), async (c) => {
   const db = createDb(c.env.DB)
   const id = c.req.param('id')
   const body = await c.req.json()
@@ -232,9 +264,24 @@ campaignRoutes.get('/:id/full', requirePermission('campaigns.view'), async (c) =
   const instructions = await db.select().from(campaignInstructions).where(eq(campaignInstructions.campaignId, id)).get()
   const settings = await db.select().from(campaignSettings).where(eq(campaignSettings.campaignId, id)).get()
 
+  let assignedToName: string | null = null
+  if (campaign.assignedTo) {
+    const u = await db.select({ name: users.name })
+      .from(users)
+      .where(eq(users.id, campaign.assignedTo))
+      .get()
+    assignedToName = u?.name ?? null
+  }
+
+  const role = c.get('userRole')
+  const userId = c.get('userId')
+  const isOwner = role === 'admin' || campaign.assignedTo === userId
+
   return c.json({
     ...campaign,
     passCode: campaign.passCodeEncrypted,
+    assignedToName,
+    isOwner,
     instructions: instructions ? {
       contentHtml: instructions.contentHtml,
       contentJson: instructions.contentJson ? JSON.parse(instructions.contentJson) : null,
@@ -248,6 +295,13 @@ campaignRoutes.post('/', requirePermission('campaigns.create'), async (c) => {
   const db = createDb(c.env.DB)
   const body = await c.req.json()
   const id = crypto.randomUUID()
+  const userId = c.get('userId')
+  const role = c.get('userRole')
+
+  // Admin can assign to anyone (or NULL); employee force = self
+  const assignedTo = role === 'admin'
+    ? (body.assignedTo ?? null)
+    : (userId === 'dev-admin' ? null : userId)
 
   // Auto-generate code
   const count = await db.select({ count: sql<number>`count(*)` }).from(campaigns).get()
@@ -266,23 +320,27 @@ campaignRoutes.post('/', requirePermission('campaigns.create'), async (c) => {
     priority: body.priority ?? 'medium',
     maxWrongAttempts: body.maxWrongAttempts,
     status: 'draft',
-    createdBy: c.get('userId') === 'dev-admin' ? null : c.get('userId'),
-    updatedBy: c.get('userId') === 'dev-admin' ? null : c.get('userId'),
+    assignedTo,
+    createdBy: userId === 'dev-admin' ? null : userId,
+    updatedBy: userId === 'dev-admin' ? null : userId,
   })
 
   return c.json({ id, code }, 201)
 })
 
 // PUT /api/campaigns/:id
-campaignRoutes.put('/:id', requirePermission('campaigns.edit'), async (c) => {
+campaignRoutes.put('/:id', requirePermission('campaigns.edit'), requireCampaignOwnerOrAdmin(), async (c) => {
   const db = createDb(c.env.DB)
   const id = c.req.param('id')
   const body = await c.req.json()
   const userId = c.get('userId')
   const updatedBy = userId === 'dev-admin' ? null : userId
 
+  // Strip assignedTo — reassignment goes through PATCH /:id/assignee
+  const { assignedTo: _ignored, ...updateFields } = body
+
   await db.update(campaigns).set({
-    ...body,
+    ...updateFields,
     updatedBy,
     updatedAt: sql`(datetime('now'))`,
   }).where(eq(campaigns.id, id))
@@ -291,7 +349,7 @@ campaignRoutes.put('/:id', requirePermission('campaigns.edit'), async (c) => {
 })
 
 // POST /api/campaigns/:id/publish
-campaignRoutes.post('/:id/publish', requirePermission('campaigns.edit'), async (c) => {
+campaignRoutes.post('/:id/publish', requirePermission('campaigns.edit'), requireCampaignOwnerOrAdmin(), async (c) => {
   const db = createDb(c.env.DB)
   const id = c.req.param('id')
   const userId = c.get('userId')
@@ -308,7 +366,7 @@ campaignRoutes.post('/:id/publish', requirePermission('campaigns.edit'), async (
 })
 
 // POST /api/campaigns/:id/pause
-campaignRoutes.post('/:id/pause', requirePermission('campaigns.edit'), async (c) => {
+campaignRoutes.post('/:id/pause', requirePermission('campaigns.edit'), requireCampaignOwnerOrAdmin(), async (c) => {
   const db = createDb(c.env.DB)
   const id = c.req.param('id')
   const userId = c.get('userId')
@@ -331,8 +389,51 @@ campaignRoutes.post('/:id/pause', requirePermission('campaigns.edit'), async (c)
   return c.json({ ok: true })
 })
 
+// PATCH /api/campaigns/:id/assignee — reassign campaign owner (admin only)
+campaignRoutes.patch('/:id/assignee', requirePermission('campaigns.edit'), async (c) => {
+  if (c.get('userRole') !== 'admin') {
+    return c.json({ error: 'Forbidden — admin only' }, 403)
+  }
+  const db = createDb(c.env.DB)
+  const id = c.req.param('id')
+  const body = await c.req.json<{ assignedTo: string | null }>()
+  const newAssignee = body.assignedTo ?? null
+
+  const cur = await db.select({ assignedTo: campaigns.assignedTo })
+    .from(campaigns).where(eq(campaigns.id, id)).get()
+  if (!cur) return c.json({ error: 'Not found' }, 404)
+
+  // Validate: if newAssignee provided, ensure user exists
+  if (newAssignee) {
+    const u = await db.select({ id: users.id })
+      .from(users).where(eq(users.id, newAssignee)).get()
+    if (!u) return c.json({ error: 'User not found' }, 400)
+  }
+
+  const userId = c.get('userId')
+  const updatedBy = userId === 'dev-admin' ? null : userId
+
+  await db.update(campaigns).set({
+    assignedTo: newAssignee,
+    updatedBy,
+    updatedAt: sql`(datetime('now'))`,
+  }).where(eq(campaigns.id, id))
+
+  // Audit log
+  await db.insert(auditLogs).values({
+    id: crypto.randomUUID(),
+    actorId: updatedBy,
+    action: 'campaign.assigned',
+    entityType: 'campaign',
+    entityId: id,
+    changes: JSON.stringify({ from: cur.assignedTo, to: newAssignee }),
+  })
+
+  return c.json({ ok: true })
+})
+
 // DELETE /api/campaigns/:id
-campaignRoutes.delete('/:id', requirePermission('campaigns.delete'), async (c) => {
+campaignRoutes.delete('/:id', requirePermission('campaigns.delete'), requireCampaignOwnerOrAdmin(), async (c) => {
   const db = createDb(c.env.DB)
   const id = c.req.param('id')
   await db.delete(campaigns).where(eq(campaigns.id, id))
