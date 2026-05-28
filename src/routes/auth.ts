@@ -4,6 +4,7 @@ import { compareSync } from 'bcryptjs'
 import { createDb } from '../db/client'
 import { users } from '../db/schema'
 import { eq } from 'drizzle-orm'
+import { authMiddleware } from '../middleware/auth'
 import type { AppEnv } from '../lib/types'
 
 export const authRoutes = new Hono<AppEnv>()
@@ -49,8 +50,7 @@ authRoutes.post('/login', async (c) => {
 })
 
 // GET /api/auth/me — get current user info
-authRoutes.get('/me', async (c) => {
-  // This route requires auth middleware to be applied at parent level
+authRoutes.get('/me', authMiddleware, async (c) => {
   const userId = c.get('userId')
   const db = createDb(c.env.DB)
 

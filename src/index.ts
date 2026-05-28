@@ -11,7 +11,6 @@ import { statsRoutes } from './routes/stats'
 import { settingsRoutes } from './routes/settings'
 import { mediaRoutes } from './routes/media'
 import { trackRoutes } from './routes/track'
-import { authMiddleware } from './middleware/auth'
 import { createDb } from './db/client'
 import { seed } from './db/seed'
 import { runDailyEvaluator } from './lib/alerts/evaluators/low-users'
@@ -37,9 +36,6 @@ app.use('/api/*', cors({
 // ─── Public routes ───
 app.get('/health', (c) => c.json({ status: 'ok', time: new Date().toISOString() }))
 app.route('/api/auth', authRoutes)
-
-// ─── Protected routes (auth required for /me) ───
-app.use('/api/auth/me', authMiddleware)
 
 // ─── Protected API routes ───
 app.route('/api/users', userRoutes)
