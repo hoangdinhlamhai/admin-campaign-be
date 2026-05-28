@@ -1,7 +1,9 @@
 import { and, eq } from 'drizzle-orm'
-import { campaigns, campaignSettings, campaignDailyStats } from '../../../db/schema'
+import { campaigns, campaignDailyStats } from '../../../db/schema'
 import type { Database } from '../../../db/client'
 import { emitAlert } from '../evaluate'
+import { resolveCampaignSettings } from '../../settings/resolve-campaign-setting'
+import { loadGlobalSettings } from '../../settings/load-global-settings'
 
 // Returns the date in VN timezone (UTC+7) as YYYY-MM-DD.
 // Cron fires at 16:55 UTC = 23:55 VN, so today_VN = today_UTC + 7h.
@@ -13,35 +15,36 @@ function todayVN(): string {
 
 export type DailyEvaluatorResult = { scanned: number; emitted: number }
 
-// Scans all active campaigns with notify_low_users=true and emits low_users alert
-// when completedCount for the day is below lowUsersThreshold. Idempotent (dedup A).
+// Scans all active campaigns and emits low_users alert when completedCount
+// for the day is below the effective lowUsersThreshold (campaign → global → default).
+// Idempotent (dedup A).
 export async function runDailyEvaluator(db: Database): Promise<DailyEvaluatorResult> {
   const today = todayVN()
+  const globalsCache = await loadGlobalSettings(db)
 
+  // Get all active campaigns with their daily stats
   const rows = await db.select({
     campaignId: campaigns.id,
     campaignName: campaigns.name,
     parentCategoryId: campaigns.parentCategoryId,
     childCategoryId: campaigns.childCategoryId,
-    threshold: campaignSettings.lowUsersThreshold,
     completed: campaignDailyStats.completedCount,
   })
     .from(campaigns)
-    .innerJoin(campaignSettings, eq(campaignSettings.campaignId, campaigns.id))
     .leftJoin(campaignDailyStats, and(
       eq(campaignDailyStats.campaignId, campaigns.id),
       eq(campaignDailyStats.statDate, today),
     ))
-    .where(and(
-      eq(campaigns.status, 'active'),
-      eq(campaignSettings.notifyLowUsers, true),
-    ))
+    .where(eq(campaigns.status, 'active'))
 
   let emitted = 0
   for (const r of rows) {
-    if (r.threshold == null || r.threshold <= 0) continue
+    const settings = await resolveCampaignSettings(db, r.campaignId, globalsCache)
+    if (!settings.notifyLowUsers) continue
+    if (settings.lowUsersThreshold <= 0) continue
+
     const completed = r.completed ?? 0
-    if (completed < r.threshold) {
+    if (completed < settings.lowUsersThreshold) {
       const id = await emitAlert(db, {
         campaignId: r.campaignId,
         parentCategoryId: r.parentCategoryId,
@@ -49,7 +52,7 @@ export async function runDailyEvaluator(db: Database): Promise<DailyEvaluatorRes
         type: 'low_users',
         severity: 'warning',
         title: `Chưa đủ user mục tiêu: ${r.campaignName}`,
-        description: `Hôm nay đạt ${completed}/${r.threshold} user.`,
+        description: `Hôm nay đạt ${completed}/${settings.lowUsersThreshold} user.`,
       })
       if (id) emitted++
     }

@@ -1,18 +1,23 @@
 import { and, eq, sql } from 'drizzle-orm'
-import { campaigns, campaignDailyStats, campaignSettings } from '../../../db/schema'
+import { campaigns, campaignDailyStats } from '../../../db/schema'
 import type { Database } from '../../../db/client'
 import { emitAlert } from '../evaluate'
 import { emitCampaignPausedAlert } from './campaign-paused'
+import { resolveCampaignSettings } from '../../settings/resolve-campaign-setting'
+import type { GlobalSettingsMap } from '../../settings/load-global-settings'
 
 // Fires when display_count >= settings.noValidEntryDisplays AND valid_entry_count = 0.
-// Only active when settings.pauseOnNoValidEntry is enabled.
+// Only active when effective setting `pauseOnNoValidEntry` is enabled.
 // Side effect: when triggered, also flips campaign status to 'paused' and emits
 // campaign_paused alert (if notifyCampaignPaused is on).
-export async function evaluateNoValidEntry(db: Database, campaignId: string, date: string): Promise<void> {
-  const settings = await db.select().from(campaignSettings)
-    .where(eq(campaignSettings.campaignId, campaignId))
-    .get()
-  if (!settings?.pauseOnNoValidEntry || !settings.noValidEntryDisplays) return
+export async function evaluateNoValidEntry(
+  db: Database,
+  campaignId: string,
+  date: string,
+  globalsCache?: GlobalSettingsMap,
+): Promise<void> {
+  const settings = await resolveCampaignSettings(db, campaignId, globalsCache)
+  if (!settings.pauseOnNoValidEntry || !settings.noValidEntryDisplays) return
 
   const stats = await db.select({
     displayCount: campaignDailyStats.displayCount,
@@ -55,6 +60,6 @@ export async function evaluateNoValidEntry(db: Database, campaignId: string, dat
         eq(campaigns.status, 'active'),
       ))
 
-    await emitCampaignPausedAlert(db, campaignId, 'no_valid_entry')
+    await emitCampaignPausedAlert(db, campaignId, 'no_valid_entry', globalsCache)
   }
 }
