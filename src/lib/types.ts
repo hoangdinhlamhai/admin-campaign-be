@@ -6,6 +6,7 @@ export type AppBindings = {
   RESEND_API_KEY?: string
   RESEND_FROM?: string
   FE_URL?: string
+  CORS_ALLOWED_ORIGINS?: string
 }
 
 export type AppVariables = {

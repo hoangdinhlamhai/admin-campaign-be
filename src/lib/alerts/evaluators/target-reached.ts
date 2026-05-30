@@ -1,5 +1,5 @@
 import { and, eq, sql } from 'drizzle-orm'
-import { campaigns, campaignDailyStats, auditLogs } from '../../../db/schema'
+import { campaigns, lockSessions, lockEvents, auditLogs } from '../../../db/schema'
 import type { Database } from '../../../db/client'
 import type { AppBindings } from '../../types'
 import { emitAlert } from '../evaluate'
@@ -14,13 +14,11 @@ export type TargetReachedResult =
   | { paused: true; alertEmitted: boolean; mailed: boolean; alertId: string | null }
 
 // Detects when a campaign reaches its dailyUserTarget for the day,
-// atomically pauses it (status='active' → 'paused'), emits an alert
-// (dedup A: 1/campaign/type/day), writes an audit log, and fires off
-// a notification email via ctx.waitUntil (non-blocking).
+// atomically pauses it (status='active' → 'paused'), emits an alert,
+// audit log, and notification email to the assignee.
 //
-// The atomic UPDATE WHERE status='active' is the natural lock: if multiple
-// task_completed events race here, only one will flip the row, the others
-// see 0 rows affected and return early. No dedup table needed.
+// Source of completed count: lock_events with event_type='unlocked', filtered
+// by lock_sessions.started_at within today's local-day window.
 export async function evaluateTargetReached(
   db: Database,
   env: AppBindings,
@@ -28,34 +26,46 @@ export async function evaluateTargetReached(
   campaignId: string,
   today: string,
 ): Promise<TargetReachedResult> {
-  const row = await db.select({
+  const camp = await db.select({
     id: campaigns.id,
     code: campaigns.code,
     name: campaigns.name,
+    status: campaigns.status,
     target: campaigns.dailyUserTarget,
     parentCategoryId: campaigns.parentCategoryId,
     childCategoryId: campaigns.childCategoryId,
-    completed: campaignDailyStats.completedCount,
   })
     .from(campaigns)
-    .leftJoin(campaignDailyStats, and(
-      eq(campaignDailyStats.campaignId, campaigns.id),
-      eq(campaignDailyStats.statDate, today),
-    ))
     .where(eq(campaigns.id, campaignId))
     .get()
 
-  if (!row) return { paused: false, reason: 'campaign-not-found' }
+  if (!camp) return { paused: false, reason: 'campaign-not-found' }
 
-  const target = row.target ?? 0
-  const completed = row.completed ?? 0
-
+  const target = camp.target ?? 0
   if (target <= 0) return { paused: false, reason: 'no-target' }
+  if (camp.status !== 'active') return { paused: false, reason: 'not-active' }
+
+  // Day window: today UTC midnight → next day midnight (epoch ms)
+  const dayStart = new Date(`${today}T00:00:00Z`).getTime()
+  const dayEnd = dayStart + 24 * 3600 * 1000
+
+  const completedRow = await db.select({
+    n: sql<number>`coalesce(count(*), 0)`,
+  })
+    .from(lockEvents)
+    .innerJoin(lockSessions, eq(lockSessions.id, lockEvents.sessionId))
+    .where(and(
+      eq(lockSessions.campaignId, campaignId),
+      eq(lockEvents.eventType, 'unlocked'),
+      sql`${lockSessions.startedAt} >= ${dayStart}`,
+      sql`${lockSessions.startedAt} < ${dayEnd}`,
+    ))
+    .get()
+
+  const completed = completedRow?.n ?? 0
   if (completed < target) return { paused: false, reason: 'not-reached' }
 
   // Atomic pause — only flips when status is currently 'active'.
-  // D1 returns { meta: { changes } } from .run() but drizzle wrapper shape varies;
-  // we use a defensive cast and fall back to a re-SELECT if needed.
   const updateResult = await db.update(campaigns)
     .set({ status: 'paused', updatedAt: sql`(datetime('now'))` })
     .where(and(
@@ -67,23 +77,20 @@ export async function evaluateTargetReached(
   const meta = (updateResult as { meta?: { changes?: number } }).meta
   let rowsChanged = meta?.changes
   if (rowsChanged === undefined) {
-    // Fallback: re-SELECT to confirm pause happened
     const after = await db.select({ status: campaigns.status })
       .from(campaigns).where(eq(campaigns.id, campaignId)).get()
     rowsChanged = after?.status === 'paused' ? 1 : 0
   }
 
-  if (rowsChanged === 0) {
-    return { paused: false, reason: 'not-active' }
-  }
+  if (rowsChanged === 0) return { paused: false, reason: 'not-active' }
 
   const alertId = await emitAlert(db, {
     campaignId,
-    parentCategoryId: row.parentCategoryId,
-    childCategoryId: row.childCategoryId,
+    parentCategoryId: camp.parentCategoryId,
+    childCategoryId: camp.childCategoryId,
     type: 'target_reached',
     severity: 'info',
-    title: `Đã đạt target: ${row.name}`,
+    title: `Đã đạt target: ${camp.name}`,
     description: `Hôm nay đạt ${completed}/${target} user. Đã tự động tạm dừng.`,
   })
 
@@ -93,11 +100,7 @@ export async function evaluateTargetReached(
     action: 'campaign.auto_paused',
     entityType: 'campaign',
     entityId: campaignId,
-    changes: JSON.stringify({
-      reason: 'target_reached',
-      completed,
-      target,
-    }),
+    changes: JSON.stringify({ reason: 'target_reached', completed, target }),
   })
 
   let mailed = false
@@ -105,12 +108,12 @@ export async function evaluateTargetReached(
     const globalsCache = await loadGlobalSettings(db)
     const settings = await resolveCampaignSettings(db, campaignId, globalsCache)
 
-    if (settings.notifyCampaignPaused) {
+    if (settings.notifyTargetReached) {
       const { to, assigneeName } = await resolveRecipients(db, campaignId)
       if (to.length > 0) {
         const { subject, html } = renderTargetReachedEmail({
-          campaignName: row.name,
-          campaignCode: row.code,
+          campaignName: camp.name,
+          campaignCode: camp.code,
           campaignId,
           completed,
           target,
@@ -126,7 +129,6 @@ export async function evaluateTargetReached(
         if (typeof ctx?.waitUntil === 'function') {
           ctx.waitUntil(sendPromise)
         } else {
-          // Dev/test fallback: fire-and-forget without ctx
           void sendPromise
         }
         mailed = true

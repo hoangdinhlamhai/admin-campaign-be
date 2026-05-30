@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { createDb } from '../db/client'
-import { childCategories, parentCategories, campaigns, campaignDailyStats } from '../db/schema'
-import { eq, sql, and, gte, lte } from 'drizzle-orm'
+import { childCategories, parentCategories, campaigns, lockSessions, lockEvents } from '../db/schema'
+import { eq, sql, and } from 'drizzle-orm'
 import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
 import { parseDateRange } from '../lib/stats/range-helpers'
@@ -16,6 +16,8 @@ childCategoryRoutes.get('/', requirePermission('categories.view'), async (c) => 
   const db = createDb(c.env.DB)
   const parentId = c.req.query('parentId')
   const range = parseDateRange(c.req.query('from'), c.req.query('to'))
+  const fromMs = new Date(range.from).getTime()
+  const toMs = new Date(range.to).getTime() + 24 * 3600 * 1000
 
   // Subquery: campaign counts per child category
   const campaignCountSub = db
@@ -23,28 +25,28 @@ childCategoryRoutes.get('/', requirePermission('categories.view'), async (c) => 
       childId: campaigns.childCategoryId,
       total: sql<number>`count(*)`.as('camp_total'),
       paused: sql<number>`sum(case when ${campaigns.status} = 'paused' then 1 else 0 end)`.as('camp_paused'),
+      target: sql<number>`coalesce(sum(case when ${campaigns.status} = 'active' then ${campaigns.dailyUserTarget} else 0 end), 0)`.as('camp_target'),
     })
     .from(campaigns)
     .groupBy(campaigns.childCategoryId)
     .as('campaign_count_sub')
 
-  // Subquery: range stats from campaign_daily_stats via campaigns
+  // Subquery: completed count from lock_events (unlocked) per child category in date range
   const rangeStatsSub = db
     .select({
       childId: campaigns.childCategoryId,
-      target: sql<number>`coalesce(sum(${campaignDailyStats.dailyUserTarget}), 0)`.as('rs_target'),
-      completed: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`.as('rs_completed'),
-      missing: sql<number>`coalesce(sum(${campaignDailyStats.missingCount}), 0)`.as('rs_missing'),
+      completed: sql<number>`coalesce(sum(case when ${lockEvents.eventType} = 'unlocked' then 1 else 0 end), 0)`.as('rs_completed'),
     })
     .from(campaigns)
     .innerJoin(
-      campaignDailyStats,
+      lockSessions,
       and(
-        eq(campaignDailyStats.campaignId, campaigns.id),
-        gte(campaignDailyStats.statDate, range.from),
-        lte(campaignDailyStats.statDate, range.to)
-      )
+        eq(lockSessions.campaignId, campaigns.id),
+        sql`${lockSessions.startedAt} >= ${fromMs}`,
+        sql`${lockSessions.startedAt} < ${toMs}`,
+      ),
     )
+    .innerJoin(lockEvents, eq(lockEvents.sessionId, lockSessions.id))
     .groupBy(campaigns.childCategoryId)
     .as('range_stats_sub')
 
@@ -64,9 +66,8 @@ childCategoryRoutes.get('/', requirePermission('categories.view'), async (c) => 
       createdAt: childCategories.createdAt,
       campaignCount: sql<number>`coalesce(${campaignCountSub.total}, 0)`,
       pausedCount: sql<number>`coalesce(${campaignCountSub.paused}, 0)`,
-      rsTarget: sql<number>`coalesce(${rangeStatsSub.target}, 0)`,
+      rsTarget: sql<number>`coalesce(${campaignCountSub.target}, 0)`,
       rsCompleted: sql<number>`coalesce(${rangeStatsSub.completed}, 0)`,
-      rsMissing: sql<number>`coalesce(${rangeStatsSub.missing}, 0)`,
     })
     .from(childCategories)
     .leftJoin(parentCategories, eq(childCategories.parentId, parentCategories.id))
@@ -77,26 +78,31 @@ childCategoryRoutes.get('/', requirePermission('categories.view'), async (c) => 
     ? await baseQuery.where(eq(childCategories.parentId, parentId))
     : await baseQuery
 
-  const result = rows.map((r) => ({
-    id: r.id,
-    parentId: r.parentId,
-    parentName: r.parentName,
-    name: r.name,
-    website: r.website,
-    initials: r.initials,
-    slug: r.slug,
-    description: r.description,
-    dailyUserTarget: r.dailyUserTarget,
-    status: r.status,
-    createdAt: r.createdAt,
-    campaignCount: r.campaignCount ?? 0,
-    pausedCount: r.pausedCount ?? 0,
-    rangeStats: {
-      target: r.rsTarget ?? 0,
-      completed: r.rsCompleted ?? 0,
-      missing: r.rsMissing ?? 0,
-    },
-  }))
+  const result = rows.map((r) => {
+    const target = r.rsTarget ?? 0
+    const completed = r.rsCompleted ?? 0
+    const missing = Math.max(0, target - completed)
+    return {
+      id: r.id,
+      parentId: r.parentId,
+      parentName: r.parentName,
+      name: r.name,
+      website: r.website,
+      initials: r.initials,
+      slug: r.slug,
+      description: r.description,
+      dailyUserTarget: r.dailyUserTarget,
+      status: r.status,
+      createdAt: r.createdAt,
+      campaignCount: r.campaignCount ?? 0,
+      pausedCount: r.pausedCount ?? 0,
+      rangeStats: {
+        target,
+        completed,
+        missing,
+      },
+    }
+  })
 
   return c.json(result)
 })
@@ -142,26 +148,40 @@ childCategoryRoutes.get('/:id', requirePermission('categories.view'), async (c) 
   const campaignCount = countRow?.total ?? 0
   const pausedCount = countRow?.paused ?? 0
 
-  // Range stats for this child (all campaigns under this child)
-  const rangeRow = await db
+  const fromMs = new Date(range.from).getTime()
+  const toMs = new Date(range.to).getTime() + 24 * 3600 * 1000
+
+  // Range stats: target = SUM active campaigns daily_user_target; completed = COUNT lock_events 'unlocked'
+  const targetRow = await db
     .select({
-      target: sql<number>`coalesce(sum(${campaignDailyStats.dailyUserTarget}), 0)`,
-      completed: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`,
-      missing: sql<number>`coalesce(sum(${campaignDailyStats.missingCount}), 0)`,
+      target: sql<number>`coalesce(sum(case when ${campaigns.status} = 'active' then ${campaigns.dailyUserTarget} else 0 end), 0)`,
     })
     .from(campaigns)
-    .innerJoin(
-      campaignDailyStats,
-      and(
-        eq(campaignDailyStats.campaignId, campaigns.id),
-        gte(campaignDailyStats.statDate, range.from),
-        lte(campaignDailyStats.statDate, range.to)
-      )
-    )
     .where(eq(campaigns.childCategoryId, id))
     .get()
 
-  // Campaigns breakdown: each campaign with aggregated stats in range
+  const completedRow = await db
+    .select({
+      completed: sql<number>`coalesce(count(*), 0)`,
+    })
+    .from(lockEvents)
+    .innerJoin(lockSessions, eq(lockSessions.id, lockEvents.sessionId))
+    .innerJoin(campaigns, eq(campaigns.id, lockSessions.campaignId))
+    .where(
+      and(
+        eq(campaigns.childCategoryId, id),
+        eq(lockEvents.eventType, 'unlocked'),
+        sql`${lockSessions.startedAt} >= ${fromMs}`,
+        sql`${lockSessions.startedAt} < ${toMs}`,
+      ),
+    )
+    .get()
+
+  const rsTarget = targetRow?.target ?? 0
+  const rsCompleted = completedRow?.completed ?? 0
+  const rsMissing = Math.max(0, rsTarget - rsCompleted)
+
+  // Campaigns breakdown: each campaign with aggregated stats in range from lock_events
   const campaignRows = await db
     .select({
       id: campaigns.id,
@@ -169,41 +189,45 @@ childCategoryRoutes.get('/:id', requirePermission('categories.view'), async (c) 
       name: campaigns.name,
       status: campaigns.status,
       dailyUserTarget: campaigns.dailyUserTarget,
-      completedCount: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`,
-      missingCount: sql<number>`coalesce(sum(${campaignDailyStats.missingCount}), 0)`,
-      displayCount: sql<number>`coalesce(sum(${campaignDailyStats.displayCount}), 0)`,
+      completedCount: sql<number>`coalesce(sum(case when ${lockEvents.eventType} = 'unlocked' then 1 else 0 end), 0)`,
+      displayCount: sql<number>`coalesce(sum(case when ${lockEvents.eventType} = 'lock_displayed' then 1 else 0 end), 0)`,
     })
     .from(campaigns)
     .leftJoin(
-      campaignDailyStats,
+      lockSessions,
       and(
-        eq(campaignDailyStats.campaignId, campaigns.id),
-        gte(campaignDailyStats.statDate, range.from),
-        lte(campaignDailyStats.statDate, range.to)
-      )
+        eq(lockSessions.campaignId, campaigns.id),
+        sql`${lockSessions.startedAt} >= ${fromMs}`,
+        sql`${lockSessions.startedAt} < ${toMs}`,
+      ),
     )
+    .leftJoin(lockEvents, eq(lockEvents.sessionId, lockSessions.id))
     .where(eq(campaigns.childCategoryId, id))
     .groupBy(campaigns.id)
 
-  const campaignsList = campaignRows.map((r) => ({
-    id: r.id,
-    code: r.code,
-    name: r.name,
-    status: r.status,
-    dailyUserTarget: r.dailyUserTarget ?? 0,
-    completedCount: r.completedCount ?? 0,
-    missingCount: r.missingCount ?? 0,
-    displayCount: r.displayCount ?? 0,
-  }))
+  const campaignsList = campaignRows.map((r) => {
+    const target = r.dailyUserTarget ?? 0
+    const completed = r.completedCount ?? 0
+    return {
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      status: r.status,
+      dailyUserTarget: target,
+      completedCount: completed,
+      missingCount: Math.max(0, target - completed),
+      displayCount: r.displayCount ?? 0,
+    }
+  })
 
   return c.json({
     ...childRow,
     campaignCount,
     pausedCount,
     rangeStats: {
-      target: rangeRow?.target ?? 0,
-      completed: rangeRow?.completed ?? 0,
-      missing: rangeRow?.missing ?? 0,
+      target: rsTarget,
+      completed: rsCompleted,
+      missing: rsMissing,
     },
     campaigns: campaignsList,
   })

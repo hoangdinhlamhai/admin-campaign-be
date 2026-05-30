@@ -16,6 +16,9 @@ import { seed } from './db/seed'
 import { runDailyEvaluator } from './lib/alerts/evaluators/low-users'
 import { runAutoReactivate } from './lib/alerts/evaluators/auto-reactivate'
 import { evaluateTargetReached } from './lib/alerts/evaluators/target-reached'
+import { expireSessions } from './lib/lock/expire-sessions'
+import { seedLockTest } from '../scripts/seed-lock-test'
+import { isOriginAllowed } from './middleware/origin'
 import type { AppEnv, AppBindings } from './lib/types'
 
 const app = new Hono<AppEnv>()
@@ -23,13 +26,9 @@ const app = new Hono<AppEnv>()
 // ─── Global middleware ───
 app.use('*', logger())
 app.use('/api/*', cors({
-  origin: (origin) => {
+  origin: (origin, c) => {
     if (!origin) return undefined
-    if (origin === 'http://localhost:5173') return origin
-    if (origin === 'https://admin.senlyzer.io') return origin
-    // Cloudflare Pages: canonical + preview aliases (<hash>.admin-campaign-fe.pages.dev)
-    if (/^https:\/\/([a-z0-9-]+\.)?admin-campaign-fe\.pages\.dev$/.test(origin)) return origin
-    return undefined
+    return isOriginAllowed(origin, c.env.CORS_ALLOWED_ORIGINS) ? origin : undefined
   },
   credentials: true,
 }))
@@ -49,6 +48,14 @@ app.route('/api/settings', settingsRoutes)
 app.route('/api/media', mediaRoutes)
 app.route('/api/track', trackRoutes)
 
+// ─── Content Lock routes ───
+import { lockRoutes } from './routes/lock'
+import { eventsRoutes } from './routes/events'
+import { statsLockRoutes } from './routes/stats-lock'
+app.route('/api/v1/lock', lockRoutes)
+app.route('/api/v1/events', eventsRoutes)
+app.route('/api/v1/stats', statsLockRoutes)
+
 // ─── Dev-only: seed database ───
 // ─── Dev-only: reset & re-seed database ───
 app.post('/api/dev/reset', async (c) => {
@@ -58,6 +65,7 @@ app.post('/api/dev/reset', async (c) => {
     const tables = [
       'audit_logs', 'alerts_meta', 'alerts', 'campaign_ad_daily_stats', 'ad_sources',
       'category_daily_stats', 'campaign_daily_stats', 'campaign_attempts',
+      'lock_events', 'lock_sessions',
       'campaign_settings', 'campaign_instruction_versions', 'campaign_instructions',
       'media_assets', 'campaigns', 'child_categories', 'parent_categories',
       'user_permissions', 'global_settings', 'users',
@@ -76,6 +84,26 @@ app.post('/api/dev/seed', async (c) => {
   const db = createDb(c.env.DB)
   try {
     const result = await seed(db)
+    return c.json({ ok: true, ...result })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+app.post('/api/dev/seed-lock-test', async (c) => {
+  try {
+    const result = await seedLockTest(c.env)
+    return c.json({ ok: true, ...result })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+// Dev-only: manually trigger expire-sessions cron (same logic as cron */5).
+app.post('/api/dev/run-expire-sessions', async (c) => {
+  const db = createDb(c.env.DB)
+  try {
+    const result = await expireSessions(db)
     return c.json({ ok: true, ...result })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
@@ -120,8 +148,19 @@ app.post('/api/dev/run-target-reached/:campaignId', async (c) => {
 
 export default {
   fetch: app.fetch,
-  async scheduled(_event: ScheduledController, env: AppBindings, ctx: ExecutionContext) {
+  async scheduled(event: ScheduledController, env: AppBindings, ctx: ExecutionContext) {
     const db = createDb(env.DB)
+    const cron = event.cron
+
+    if (cron === '*/5 * * * *') {
+      ctx.waitUntil(
+        expireSessions(db)
+          .then((r) => console.log('[cron] expire sessions', r))
+          .catch((err) => console.error('[cron] expire sessions failed', err)),
+      )
+      return
+    }
+
     ctx.waitUntil(
       runDailyEvaluator(db)
         .then((r) => console.log('[cron] daily evaluator', r))

@@ -1,5 +1,5 @@
-import { and, gte, lte, sql } from 'drizzle-orm'
-import { campaignDailyStats, campaignAdDailyStats } from '../../db/schema'
+import { and, eq, sql } from 'drizzle-orm'
+import { campaignAdDailyStats, lockSessions, lockEvents } from '../../db/schema'
 import type { Database } from '../../db/client'
 import type { DateRange } from './range-helpers'
 
@@ -16,22 +16,33 @@ export type AggregatedStats = {
   conversionRate: number
 }
 
+// Aggregates organic metrics from lock_events (single source of truth) for the
+// given date range. Ad cost/clicks remain sourced from campaign_ad_daily_stats
+// (Google Ads sync — currently empty so values stay 0 → FE renders "—").
+//
+// conversionRate = unlocked / lock_displayed (organic-only conversion).
 export async function aggregateStats(db: Database, range: DateRange): Promise<AggregatedStats> {
-  const dailyRow = await db
+  const fromMs = new Date(range.from).getTime()
+  const toMs = new Date(range.to).getTime() + 24 * 3600 * 1000
+
+  const eventCounts = await db
     .select({
-      totalTarget: sql<number>`coalesce(sum(${campaignDailyStats.dailyUserTarget}), 0)`,
-      totalCompleted: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`,
-      totalMissing: sql<number>`coalesce(sum(${campaignDailyStats.missingCount}), 0)`,
-      totalDisplays: sql<number>`coalesce(sum(${campaignDailyStats.displayCount}), 0)`,
-      totalWrong: sql<number>`coalesce(sum(${campaignDailyStats.wrongEntryCount}), 0)`,
-      totalValid: sql<number>`coalesce(sum(${campaignDailyStats.validEntryCount}), 0)`,
+      eventType: lockEvents.eventType,
+      n: sql<number>`count(*)`,
     })
-    .from(campaignDailyStats)
+    .from(lockEvents)
+    .innerJoin(lockSessions, eq(lockSessions.id, lockEvents.sessionId))
     .where(and(
-      gte(campaignDailyStats.statDate, range.from),
-      lte(campaignDailyStats.statDate, range.to),
+      sql`${lockSessions.startedAt} >= ${fromMs}`,
+      sql`${lockSessions.startedAt} < ${toMs}`,
     ))
-    .get()
+    .groupBy(lockEvents.eventType)
+
+  const counts = new Map<string, number>(eventCounts.map((r) => [r.eventType, r.n ?? 0]))
+  const totalCompleted = counts.get('unlocked') ?? 0
+  const totalDisplays = counts.get('lock_displayed') ?? 0
+  const totalWrong = counts.get('pass_invalid') ?? 0
+  const totalValid = counts.get('pass_valid') ?? 0
 
   const adRow = await db
     .select({
@@ -40,30 +51,28 @@ export async function aggregateStats(db: Database, range: DateRange): Promise<Ag
     })
     .from(campaignAdDailyStats)
     .where(and(
-      gte(campaignAdDailyStats.statDate, range.from),
-      lte(campaignAdDailyStats.statDate, range.to),
+      sql`${campaignAdDailyStats.statDate} >= ${range.from}`,
+      sql`${campaignAdDailyStats.statDate} <= ${range.to}`,
     ))
     .get()
 
-  const totalCompleted = dailyRow?.totalCompleted ?? 0
-  const totalDisplays = dailyRow?.totalDisplays ?? 0
   const totalCost = adRow?.totalCost ?? 0
   const totalClicks = adRow?.totalClicks ?? 0
 
-  const cpa = totalCompleted > 0 ? Math.round(totalCost / totalCompleted) : 0
-  const conversionRate = totalClicks > 0
-    ? Math.round((totalCompleted / totalClicks) * 10000) / 100
-    : totalDisplays > 0
-      ? Math.round((totalCompleted / totalDisplays) * 10000) / 100
-      : 0
+  // Organic conversion = unlocked / lock_displayed
+  const conversionRate = totalDisplays > 0
+    ? Math.round((totalCompleted / totalDisplays) * 10000) / 100
+    : 0
+  // CPA needs Ads cost; show 0 → FE renders "—"
+  const cpa = totalCompleted > 0 && totalCost > 0 ? Math.round(totalCost / totalCompleted) : 0
 
   return {
-    totalTarget: dailyRow?.totalTarget ?? 0,
+    totalTarget: 0,
     totalCompleted,
-    totalMissing: dailyRow?.totalMissing ?? 0,
+    totalMissing: 0,
     totalDisplays,
-    totalWrong: dailyRow?.totalWrong ?? 0,
-    totalValid: dailyRow?.totalValid ?? 0,
+    totalWrong,
+    totalValid,
     totalCost,
     totalClicks,
     cpa,

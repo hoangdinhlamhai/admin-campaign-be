@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { createDb } from '../db/client'
-import { campaigns, campaignInstructions, campaignSettings, campaignDailyStats, campaignAttempts, campaignAdDailyStats, alerts, parentCategories, childCategories, users, auditLogs } from '../db/schema'
+import { campaigns, campaignInstructions, campaignSettings, campaignDailyStats, campaignAttempts, campaignAdDailyStats, alerts, parentCategories, childCategories, users, auditLogs, lockSessions, lockEvents } from '../db/schema'
 import { eq, sql, and } from 'drizzle-orm'
 import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
@@ -65,7 +65,7 @@ campaignRoutes.get('/', requirePermission('campaigns.view'), async (c) => {
       childCategoryId: campaigns.childCategoryId,
       childCategoryName: childCategories.name,
       keyword: campaigns.keyword,
-      passCode: campaigns.passCodeEncrypted,
+      passCode: campaigns.passCode,
       dailyUserTarget: campaigns.dailyUserTarget,
       priority: campaigns.priority,
       status: campaigns.status,
@@ -152,7 +152,7 @@ campaignRoutes.post('/full', requirePermission('campaigns.create'), async (c) =>
       name: body.name,
       keyword: body.keyword ?? null,
       targetUrl: body.targetUrl ?? null,
-      passCodeEncrypted: body.passCode ?? null,
+      passCode: body.passCode ?? null,
       dailyUserTarget: body.dailyUserTarget ?? 0,
       priority: body.priority ?? 'medium',
       maxWrongAttempts: body.maxWrongAttempts ?? null,
@@ -178,8 +178,7 @@ campaignRoutes.post('/full', requirePermission('campaigns.create'), async (c) =>
     const s = body.settings ?? {}
     await db.insert(campaignSettings).values({
       campaignId: id,
-      notifyLowUsers: s.notifyLowUsers ?? false,
-      lowUsersThreshold: s.lowUsersThreshold ?? null,
+      notifyTargetReached: s.notifyTargetReached ?? false,
       notifyCampaignPaused: s.notifyCampaignPaused ?? false,
       autoReactivateNextDay: s.autoReactivateNextDay ?? false,
       limitWrongPass: s.limitWrongPass ?? false,
@@ -214,7 +213,7 @@ campaignRoutes.put('/:id/full', requirePermission('campaigns.edit'), requireCamp
     name: body.name ?? existing.name,
     keyword: body.keyword ?? existing.keyword,
     targetUrl: body.targetUrl ?? existing.targetUrl,
-    passCodeEncrypted: body.passCode ?? existing.passCodeEncrypted,
+    passCode: body.passCode ?? existing.passCode,
     dailyUserTarget: body.dailyUserTarget ?? existing.dailyUserTarget,
     priority: body.priority ?? existing.priority,
     maxWrongAttempts: body.maxWrongAttempts ?? existing.maxWrongAttempts,
@@ -226,19 +225,41 @@ campaignRoutes.put('/:id/full', requirePermission('campaigns.edit'), requireCamp
   }).where(eq(campaigns.id, id))
 
   if (body.instructions) {
-    await db.update(campaignInstructions).set({
-      contentHtml: body.instructions.contentHtml,
-      contentJson: body.instructions.contentJson ? JSON.stringify(body.instructions.contentJson) : null,
-      updatedBy,
-      updatedAt: sql`(datetime('now'))`,
-    }).where(eq(campaignInstructions.campaignId, id))
+    const existingInstr = await db
+      .select({ id: campaignInstructions.id })
+      .from(campaignInstructions)
+      .where(eq(campaignInstructions.campaignId, id))
+      .get()
+
+    if (existingInstr) {
+      await db.update(campaignInstructions).set({
+        contentHtml: body.instructions.contentHtml,
+        contentJson: body.instructions.contentJson ? JSON.stringify(body.instructions.contentJson) : null,
+        updatedBy,
+        updatedAt: sql`(datetime('now'))`,
+      }).where(eq(campaignInstructions.campaignId, id))
+    } else {
+      await db.insert(campaignInstructions).values({
+        id: crypto.randomUUID(),
+        campaignId: id,
+        contentHtml: body.instructions.contentHtml,
+        contentJson: body.instructions.contentJson ? JSON.stringify(body.instructions.contentJson) : null,
+        version: 1,
+        updatedBy,
+      })
+    }
   }
 
   if (body.settings) {
     const s = body.settings
-    await db.update(campaignSettings).set({
-      notifyLowUsers: s.notifyLowUsers,
-      lowUsersThreshold: s.lowUsersThreshold ?? null,
+    const existingSettings = await db
+      .select({ campaignId: campaignSettings.campaignId })
+      .from(campaignSettings)
+      .where(eq(campaignSettings.campaignId, id))
+      .get()
+
+    const settingsValues = {
+      notifyTargetReached: s.notifyTargetReached,
       notifyCampaignPaused: s.notifyCampaignPaused,
       autoReactivateNextDay: s.autoReactivateNextDay,
       limitWrongPass: s.limitWrongPass,
@@ -247,7 +268,13 @@ campaignRoutes.put('/:id/full', requirePermission('campaigns.edit'), requireCamp
       noValidEntryDisplays: s.noValidEntryDisplays ?? null,
       updatedBy,
       updatedAt: sql`(datetime('now'))`,
-    }).where(eq(campaignSettings.campaignId, id))
+    }
+
+    if (existingSettings) {
+      await db.update(campaignSettings).set(settingsValues).where(eq(campaignSettings.campaignId, id))
+    } else {
+      await db.insert(campaignSettings).values({ campaignId: id, ...settingsValues })
+    }
   }
 
   return c.json({ ok: true })
@@ -271,8 +298,7 @@ campaignRoutes.get('/:id/full', requirePermission('campaigns.view'), async (c) =
   if (!settings) {
     await db.insert(campaignSettings).values({
       campaignId: id,
-      notifyLowUsers: true,
-      lowUsersThreshold: 5,
+      notifyTargetReached: true,
       notifyCampaignPaused: true,
       autoReactivateNextDay: true,
       limitWrongPass: true,
@@ -299,7 +325,7 @@ campaignRoutes.get('/:id/full', requirePermission('campaigns.view'), async (c) =
 
   return c.json({
     ...campaign,
-    passCode: campaign.passCodeEncrypted,
+    passCode: campaign.passCode,
     assignedToName,
     isOwner,
     instructions: instructions ? {
@@ -335,7 +361,7 @@ campaignRoutes.post('/', requirePermission('campaigns.create'), async (c) => {
     name: body.name,
     keyword: body.keyword,
     targetUrl: body.targetUrl,
-    passCodeEncrypted: body.passCode,
+    passCode: body.passCode,
     dailyUserTarget: body.dailyUserTarget ?? 0,
     priority: body.priority ?? 'medium',
     maxWrongAttempts: body.maxWrongAttempts,
@@ -349,8 +375,7 @@ campaignRoutes.post('/', requirePermission('campaigns.create'), async (c) => {
   // users see toggled-on by default in the create wizard.
   await db.insert(campaignSettings).values({
     campaignId: id,
-    notifyLowUsers: true,
-    lowUsersThreshold: 5,
+    notifyTargetReached: true,
     notifyCampaignPaused: true,
     autoReactivateNextDay: true,
     limitWrongPass: true,
@@ -473,8 +498,12 @@ campaignRoutes.delete('/:id', requirePermission('campaigns.delete'), requireCamp
   const id = c.req.param('id')
 
   // Manually clean up rows in tables whose FK to campaigns has no ON DELETE CASCADE
-  // (campaign_attempts, campaign_daily_stats, campaign_ad_daily_stats, alerts).
+  // (campaign_attempts, campaign_daily_stats, campaign_ad_daily_stats, alerts, lock_sessions/lock_events).
   // Cascading tables (instructions, instruction_versions, settings) handle themselves.
+  await db.delete(lockEvents).where(
+    sql`${lockEvents.sessionId} IN (SELECT id FROM lock_sessions WHERE campaign_id = ${id})`,
+  )
+  await db.delete(lockSessions).where(eq(lockSessions.campaignId, id))
   await db.delete(campaignAttempts).where(eq(campaignAttempts.campaignId, id))
   await db.delete(campaignDailyStats).where(eq(campaignDailyStats.campaignId, id))
   await db.delete(campaignAdDailyStats).where(eq(campaignAdDailyStats.campaignId, id))

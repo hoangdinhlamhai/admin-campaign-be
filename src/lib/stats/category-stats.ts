@@ -1,6 +1,6 @@
-import { and, eq, gte, isNotNull, lte, ne, sql } from 'drizzle-orm'
+import { and, eq, isNotNull, ne, sql } from 'drizzle-orm'
 import type { Database } from '../../db/client'
-import { campaigns, campaignDailyStats, parentCategories, childCategories } from '../../db/schema'
+import { campaigns, lockSessions, lockEvents, parentCategories, childCategories } from '../../db/schema'
 import type { DateRange } from './range-helpers'
 
 export type CategoryScope = 'parent' | 'child'
@@ -19,13 +19,11 @@ export async function loadCategoryStats(
   scope: CategoryScope,
   range: DateRange,
 ): Promise<CategoryStats> {
-  const dateFilter = and(
-    gte(campaignDailyStats.statDate, range.from),
-    lte(campaignDailyStats.statDate, range.to),
-  )
+  const fromMs = new Date(range.from).getTime()
+  const toMs = new Date(range.to).getTime() + 24 * 3600 * 1000
 
   if (scope === 'parent') {
-    const [catRow, campRow, pausedRow, dailyRow] = await Promise.all([
+    const [catRow, campRow, pausedRow, targetRow, completedRow] = await Promise.all([
       db.select({ count: sql<number>`count(*)` })
         .from(parentCategories)
         .where(ne(parentCategories.status, 'archived'))
@@ -36,23 +34,32 @@ export async function loadCategoryStats(
         .where(eq(campaigns.status, 'paused'))
         .get(),
       db.select({
-        target: sql<number>`coalesce(sum(${campaignDailyStats.dailyUserTarget}), 0)`,
-        completed: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`,
-        missing: sql<number>`coalesce(sum(${campaignDailyStats.missingCount}), 0)`,
-      }).from(campaignDailyStats).where(dateFilter).get(),
+        target: sql<number>`coalesce(sum(case when ${campaigns.status} = 'active' then ${campaigns.dailyUserTarget} else 0 end), 0)`,
+      }).from(campaigns).get(),
+      db.select({ completed: sql<number>`coalesce(count(*), 0)` })
+        .from(lockEvents)
+        .innerJoin(lockSessions, eq(lockSessions.id, lockEvents.sessionId))
+        .where(and(
+          eq(lockEvents.eventType, 'unlocked'),
+          sql`${lockSessions.startedAt} >= ${fromMs}`,
+          sql`${lockSessions.startedAt} < ${toMs}`,
+        ))
+        .get(),
     ])
+    const rangeTarget = targetRow?.target ?? 0
+    const rangeCompleted = completedRow?.completed ?? 0
     return {
       totalCategoryCount: catRow?.count ?? 0,
       totalCampaignCount: campRow?.count ?? 0,
       pausedCampaignCount: pausedRow?.count ?? 0,
-      rangeTarget: dailyRow?.target ?? 0,
-      rangeCompleted: dailyRow?.completed ?? 0,
-      rangeMissing: dailyRow?.missing ?? 0,
+      rangeTarget,
+      rangeCompleted,
+      rangeMissing: Math.max(0, rangeTarget - rangeCompleted),
     }
   }
 
-  // child scope
-  const [catRow, campRow, pausedRow, dailyRow] = await Promise.all([
+  // child scope: only campaigns linked to a child category
+  const [catRow, campRow, pausedRow, targetRow, completedRow] = await Promise.all([
     db.select({ count: sql<number>`count(*)` })
       .from(childCategories)
       .where(ne(childCategories.status, 'archived'))
@@ -66,21 +73,31 @@ export async function loadCategoryStats(
       .where(and(isNotNull(campaigns.childCategoryId), eq(campaigns.status, 'paused')))
       .get(),
     db.select({
-      target: sql<number>`coalesce(sum(${campaignDailyStats.dailyUserTarget}), 0)`,
-      completed: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`,
-      missing: sql<number>`coalesce(sum(${campaignDailyStats.missingCount}), 0)`,
+      target: sql<number>`coalesce(sum(case when ${campaigns.status} = 'active' then ${campaigns.dailyUserTarget} else 0 end), 0)`,
     })
-      .from(campaignDailyStats)
-      .innerJoin(campaigns, eq(campaigns.id, campaignDailyStats.campaignId))
-      .where(and(dateFilter, isNotNull(campaigns.childCategoryId)))
+      .from(campaigns)
+      .where(isNotNull(campaigns.childCategoryId))
+      .get(),
+    db.select({ completed: sql<number>`coalesce(count(*), 0)` })
+      .from(lockEvents)
+      .innerJoin(lockSessions, eq(lockSessions.id, lockEvents.sessionId))
+      .innerJoin(campaigns, eq(campaigns.id, lockSessions.campaignId))
+      .where(and(
+        isNotNull(campaigns.childCategoryId),
+        eq(lockEvents.eventType, 'unlocked'),
+        sql`${lockSessions.startedAt} >= ${fromMs}`,
+        sql`${lockSessions.startedAt} < ${toMs}`,
+      ))
       .get(),
   ])
+  const rangeTarget = targetRow?.target ?? 0
+  const rangeCompleted = completedRow?.completed ?? 0
   return {
     totalCategoryCount: catRow?.count ?? 0,
     totalCampaignCount: campRow?.count ?? 0,
     pausedCampaignCount: pausedRow?.count ?? 0,
-    rangeTarget: dailyRow?.target ?? 0,
-    rangeCompleted: dailyRow?.completed ?? 0,
-    rangeMissing: dailyRow?.missing ?? 0,
+    rangeTarget,
+    rangeCompleted,
+    rangeMissing: Math.max(0, rangeTarget - rangeCompleted),
   }
 }

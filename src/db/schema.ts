@@ -80,7 +80,7 @@ export const campaigns = sqliteTable('campaigns', {
   name: text('name').notNull(),
   keyword: text('keyword'),
   targetUrl: text('target_url'),
-  passCodeEncrypted: text('pass_code_encrypted'),
+  passCode: text('pass_code'),
   dailyUserTarget: integer('daily_user_target').default(0),
   priority: text('priority', { enum: ['low', 'medium', 'high'] }).default('medium'),
   maxWrongAttempts: integer('max_wrong_attempts'),
@@ -148,8 +148,7 @@ export const mediaAssets = sqliteTable('media_assets', {
 
 export const campaignSettings = sqliteTable('campaign_settings', {
   campaignId: text('campaign_id').primaryKey().references(() => campaigns.id, { onDelete: 'cascade' }),
-  notifyLowUsers: integer('notify_low_users', { mode: 'boolean' }).default(false),
-  lowUsersThreshold: integer('low_users_threshold'),
+  notifyTargetReached: integer('notify_target_reached', { mode: 'boolean' }).default(false),
   notifyCampaignPaused: integer('notify_campaign_paused', { mode: 'boolean' }).default(false),
   autoReactivateNextDay: integer('auto_reactivate_next_day', { mode: 'boolean' }).default(false),
   limitWrongPass: integer('limit_wrong_pass', { mode: 'boolean' }).default(false),
@@ -305,4 +304,46 @@ export const auditLogs = sqliteTable('audit_logs', {
 }, (table) => [
   index('idx_audit_actor').on(table.actorId, table.createdAt),
   index('idx_audit_entity').on(table.entityType, table.entityId),
+])
+
+// ═══════════════════════════════════════════════════════════
+// Content Lock: Sessions + Events
+// ═══════════════════════════════════════════════════════════
+
+export const lockSessions = sqliteTable('lock_sessions', {
+  id: text('id').primaryKey(),
+  publisherId: text('publisher_id').notNull().default('test_pub'),
+  contentId: text('content_id').notNull(),
+  campaignId: text('campaign_id').notNull().references(() => campaigns.id),
+  status: text('status', { enum: ['started', 'completed', 'exhausted', 'expired'] })
+    .notNull().default('started'),
+  attemptsLeft: integer('attempts_left').notNull().default(5),
+  userFingerprint: text('user_fingerprint'),
+  startedAt: integer('started_at').notNull(),
+  completedAt: integer('completed_at'),
+  expiresAt: integer('expires_at').notNull(),
+}, (table) => [
+  index('idx_lock_sessions_status_expires').on(table.status, table.expiresAt),
+  index('idx_lock_sessions_campaign').on(table.campaignId),
+])
+
+export const lockEvents = sqliteTable('lock_events', {
+  id: text('id').primaryKey(),
+  sessionId: text('session_id').notNull().references(() => lockSessions.id),
+  eventType: text('event_type', {
+    enum: [
+      'lock_displayed',
+      'unlock_clicked',
+      'target_clicked',
+      'pass_attempted',
+      'pass_valid',
+      'pass_invalid',
+      'abandoned',
+      'unlocked',
+    ],
+  }).notNull(),
+  eventData: text('event_data'),
+  createdAt: integer('created_at').notNull(),
+}, (table) => [
+  index('idx_lock_events_session').on(table.sessionId, table.createdAt),
 ])

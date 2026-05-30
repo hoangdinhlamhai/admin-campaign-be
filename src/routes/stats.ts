@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { createDb } from '../db/client'
-import { campaignDailyStats, campaignAdDailyStats, campaigns, parentCategories, childCategories } from '../db/schema'
+import { campaignAdDailyStats, campaigns, parentCategories, childCategories, lockSessions, lockEvents, campaignDailyStats } from '../db/schema'
 import { and, eq, gte, lte, like, or, sql } from 'drizzle-orm'
 import { authMiddleware } from '../middleware/auth'
 import { requirePermission } from '../middleware/rbac'
@@ -78,20 +78,16 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
   const db = createDb(c.env.DB)
   const range = parseDateRange(c.req.query('from'), c.req.query('to'))
   const days = rangeDays(range)
+  const fromMs = new Date(range.from).getTime()
+  const toMs = new Date(range.to).getTime() + 24 * 3600 * 1000
 
   const q = c.req.query('q')?.trim()
   const parentId = c.req.query('parentId')
   const childId = c.req.query('childId')
 
-  // Build WHERE conditions for campaigns
   const conditions: ReturnType<typeof eq>[] = []
-
-  if (parentId) {
-    conditions.push(eq(campaigns.parentCategoryId, parentId))
-  }
-  if (childId) {
-    conditions.push(eq(campaigns.childCategoryId, childId))
-  }
+  if (parentId) conditions.push(eq(campaigns.parentCategoryId, parentId))
+  if (childId) conditions.push(eq(campaigns.childCategoryId, childId))
   if (q) {
     conditions.push(or(
       like(campaigns.name, `%${q}%`),
@@ -99,7 +95,7 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
     )!)
   }
 
-  // Subquery: aggregate ad stats per campaign within date range
+  // Subquery: ad cost/clicks per campaign within date range
   const adAgg = db
     .select({
       campaignId: campaignAdDailyStats.campaignId,
@@ -114,6 +110,24 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
     .groupBy(campaignAdDailyStats.campaignId)
     .as('ad_agg')
 
+  // Subquery: organic event counts per campaign from lock_events
+  const lockAgg = db
+    .select({
+      campaignId: lockSessions.campaignId,
+      displays: sql<number>`coalesce(sum(case when ${lockEvents.eventType} = 'lock_displayed' then 1 else 0 end), 0)`.as('lock_displays'),
+      completed: sql<number>`coalesce(sum(case when ${lockEvents.eventType} = 'unlocked' then 1 else 0 end), 0)`.as('lock_completed'),
+      valid: sql<number>`coalesce(sum(case when ${lockEvents.eventType} = 'pass_valid' then 1 else 0 end), 0)`.as('lock_valid'),
+      wrong: sql<number>`coalesce(sum(case when ${lockEvents.eventType} = 'pass_invalid' then 1 else 0 end), 0)`.as('lock_wrong'),
+    })
+    .from(lockSessions)
+    .innerJoin(lockEvents, eq(lockEvents.sessionId, lockSessions.id))
+    .where(and(
+      sql`${lockSessions.startedAt} >= ${fromMs}`,
+      sql`${lockSessions.startedAt} < ${toMs}`,
+    ))
+    .groupBy(lockSessions.campaignId)
+    .as('lock_agg')
+
   const rows = await db
     .select({
       id: campaigns.id,
@@ -125,25 +139,19 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
       childName: childCategories.name,
       status: campaigns.status,
       dailyUserTarget: campaigns.dailyUserTarget,
-      displays: sql<number>`coalesce(sum(${campaignDailyStats.displayCount}), 0)`,
-      valid: sql<number>`coalesce(sum(${campaignDailyStats.validEntryCount}), 0)`,
-      wrong: sql<number>`coalesce(sum(${campaignDailyStats.wrongEntryCount}), 0)`,
-      completed: sql<number>`coalesce(sum(${campaignDailyStats.completedCount}), 0)`,
-      missing: sql<number>`coalesce(sum(${campaignDailyStats.missingCount}), 0)`,
+      displays: lockAgg.displays,
+      valid: lockAgg.valid,
+      wrong: lockAgg.wrong,
+      completed: lockAgg.completed,
       cost: adAgg.adCost,
       clicks: adAgg.adClicks,
     })
     .from(campaigns)
-    .leftJoin(campaignDailyStats, and(
-      eq(campaignDailyStats.campaignId, campaigns.id),
-      gte(campaignDailyStats.statDate, range.from),
-      lte(campaignDailyStats.statDate, range.to),
-    ))
     .leftJoin(parentCategories, eq(parentCategories.id, campaigns.parentCategoryId))
     .leftJoin(childCategories, eq(childCategories.id, campaigns.childCategoryId))
     .leftJoin(adAgg, eq(adAgg.campaignId, campaigns.id))
+    .leftJoin(lockAgg, eq(lockAgg.campaignId, campaigns.id))
     .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .groupBy(campaigns.id)
 
   const items = rows.map((r) => {
     const target = (r.dailyUserTarget ?? 0) * days
@@ -152,13 +160,13 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
     const cost = r.cost ?? 0
     const clicks = r.clicks ?? 0
 
-    const conversionRate = clicks > 0
-      ? Math.round((completed / clicks) * 10000) / 100
-      : displays > 0
-        ? Math.round((completed / displays) * 10000) / 100
-        : 0
+    // Organic conversion only — Ads click conversion needs Google Ads sync
+    const conversionRate = displays > 0
+      ? Math.round((completed / displays) * 10000) / 100
+      : 0
 
     const cpa = completed > 0 && cost > 0 ? Math.round(cost / completed) : null
+    const missing = Math.max(0, target - completed)
 
     return {
       id: r.id,
@@ -174,7 +182,7 @@ statsRoutes.get('/overview-table', requirePermission('campaigns.view'), async (c
       valid: r.valid ?? 0,
       wrong: r.wrong ?? 0,
       completed,
-      missing: r.missing ?? 0,
+      missing,
       conversionRate,
       cost: cost > 0 ? cost : null,
       clicks: clicks > 0 ? clicks : null,

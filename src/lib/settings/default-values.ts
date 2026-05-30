@@ -1,6 +1,5 @@
 export const GLOBAL_SETTING_KEYS = [
-  'notify_low_users',
-  'low_users_threshold',
+  'notify_target_reached',
   'notify_campaign_paused',
   'auto_reactivate_next_day',
   'limit_wrong_pass',
@@ -12,8 +11,7 @@ export const GLOBAL_SETTING_KEYS = [
 export type GlobalSettingKey = (typeof GLOBAL_SETTING_KEYS)[number]
 
 export const GLOBAL_SETTING_DEFAULTS: Record<GlobalSettingKey, boolean | number> = {
-  notify_low_users: false,
-  low_users_threshold: 5,
+  notify_target_reached: true,
   notify_campaign_paused: true,
   auto_reactivate_next_day: false,
   limit_wrong_pass: true,
